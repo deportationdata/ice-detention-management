@@ -1,6 +1,9 @@
 library(rvest)
 library(httr2)
 library(xml2)
+library(stringr)
+library(dplyr)
+library(purrr)
 
 url <- "https://www.ice.gov/detain/detention-management"
 
