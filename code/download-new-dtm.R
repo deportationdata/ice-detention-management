@@ -13,9 +13,6 @@ link <-
 fname <- basename(link)
 
 if (!file.exists(file.path("spreadsheets", fname))) {
-  # make new branch on github
-  system(glue::glue("git checkout -b 'New DTM spreadsheet {Sys.Date()}"))
-
   download.file(
     link,
     destfile = file.path("spreadsheets", fname),
