@@ -10,7 +10,9 @@ url <- "https://www.ice.gov/detain/detention-management"
 # 1) Download the HTML reliably (libcurl), then parse it
 doc <-
   request(url) |>
-  req_user_agent("Mozilla/5.0 (GitHub Actions; rvest/httr2)") |>
+  req_user_agent(
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.32 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.32"
+  ) |>
   req_timeout(1) |>
   req_perform() |>
   resp_body_html()
