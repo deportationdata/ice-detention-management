@@ -1,4 +1,10 @@
-library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(readxl)
+library(glue)
+library(lubridate)
 
 fls <- list.files(
   "~/Library/CloudStorage/Box-Box/deportationdata-web-archive/ice/detention_management/",
@@ -271,5 +277,5 @@ arrow::write_feather(
 
 arrow::write_feather(
   book_ins_by_arresting_agency,
-  "data/dtm/book-ins-by-arresting-agency.feather"
+  "data/book-ins-by-arresting-agency.feather"
 )
