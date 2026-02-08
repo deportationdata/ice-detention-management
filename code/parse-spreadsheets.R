@@ -77,7 +77,11 @@ book_ins_by_arresting_agency <-
     date = lubridate::make_date(cy, month_num, 1L),
     .keep = "unused"
   ) |>
-  rename(n_book_ins_ytd = Total)
+  rename(n_book_ins_ytd = Total) |>
+  left_join(
+    file_pull_dates |> select(file_date, pull_date),
+    by = "file_date"
+  )
 
 final_release_reasons_col_types <-
   c(
@@ -138,7 +142,11 @@ book_outs_by_reason <-
     .keep = "unused"
   ) |>
   rename(n_book_outs_ytd = Total) |>
-  janitor::clean_names()
+  janitor::clean_names() |>
+  left_join(
+    file_pull_dates |> select(file_date, pull_date),
+    by = "file_date"
+  )
 
 adp_by_agency_criminality_col_types <-
   c(
@@ -198,7 +206,11 @@ adp_by_agency_criminality <-
     .keep = "unused"
   ) |>
   rename(adp_fy_ytd = `FY Overall`) |>
-  janitor::clean_names()
+  janitor::clean_names() |>
+  left_join(
+    file_pull_dates |> select(file_date, pull_date),
+    by = "file_date"
+  )
 
 avg_stay_length_by_agency_criminality <-
   fls |>
@@ -252,8 +264,38 @@ avg_stay_length_by_agency_criminality <-
     .keep = "unused"
   ) |>
   rename(avg_stay_length_days_fy_ytd = `FY Overall`) |>
-  janitor::clean_names()
+  janitor::clean_names() |>
+  left_join(
+    file_pull_dates |> select(file_date, pull_date),
+    by = "file_date"
+  )
 
+removals <-
+  fls |>
+  set_names() |>
+  map_dfr(
+    ~ {
+      shts <- readxl::excel_sheets(.x)
+      readxl::read_excel(
+        .x,
+        sheet = shts[str_detect(shts, "^Detention*")][1],
+        range = "P29",
+        col_names = "removals"
+      )
+    },
+    .id = "file"
+  ) |>
+  mutate(
+    fiscal_year = str_extract(file, "FY2\\d{1}"),
+    file_date = str_extract(file, "\\d{8}") |> lubridate::mdy()
+  ) |>
+  (\(x) {
+    # check if all the files are in the data
+    stopifnot(all(fls %in% x$file))
+    x
+  })() |>
+  select(-file) |>
+  left_join(file_pull_dates |> select(file_date, pull_date), by = "file_date")
 
 arrow::write_feather(
   book_ins_by_arresting_agency,
@@ -278,4 +320,9 @@ arrow::write_feather(
 arrow::write_feather(
   book_ins_by_arresting_agency,
   "data/book-ins-by-arresting-agency.feather"
+)
+
+arrow::write_feather(
+  removals,
+  "data/removals.feather"
 )
