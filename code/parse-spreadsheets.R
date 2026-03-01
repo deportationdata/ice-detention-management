@@ -6,9 +6,13 @@ library(readxl)
 library(glue)
 library(lubridate)
 
+# fls <- list.files(
+#   "~/Library/CloudStorage/Box-Box/deportationdata-web-archive/ice/detention_management/",
+#   pattern = "FY2\\d{1}\\_detentionStats\\d{8}\\.xlsx$",
+#   full.names = TRUE
+# )
 fls <- list.files(
-  "~/Library/CloudStorage/Box-Box/deportationdata-web-archive/ice/detention_management/",
-  pattern = "FY2\\d{1}\\_detentionStats\\d{8}\\.xlsx$",
+  "spreadsheets",
   full.names = TRUE
 )
 
@@ -270,6 +274,61 @@ avg_stay_length_by_agency_criminality <-
     by = "file_date"
   )
 
+detainees_by_facility <-
+  fls |>
+  set_names() |>
+  map_dfr(
+    ~ {
+      shts <- readxl::excel_sheets(.x)
+      # find start row of table
+      start_row_df <- readxl::read_excel(
+        .x,
+        sheet = shts[str_detect(shts, "^Facilities*")][1],
+        range = readxl::cell_cols("A"),
+        col_names = FALSE
+      )
+      start_row <- which(
+        !is.na(start_row_df[[1]]) &
+          str_detect(
+            start_row_df[[1]],
+            "Name"
+          )
+      )
+      end_row <- nrow(start_row_df)
+      if (length(start_row) > 0) {
+        if (.x == fls[92]) {
+          start_row <- start_row + 1
+        }
+        # note in earlier years it does not have monthly data, so don't collect if so
+        df <- readxl::read_excel(
+          .x,
+          sheet = shts[str_detect(shts, "^Facilities*")][1],
+          range = glue::glue("A{start_row}:N{end_row}")
+        ) |>
+          filter(!is.na(Name))
+        if ("FY24 ALOS" %in% colnames(df)) {
+          df$`FY24 ALOS` <- as.character(df$`FY24 ALOS`)
+        }
+        if ("FY26 ALOS" %in% colnames(df)) {
+          df$`FY26 ALOS` <- as.character(df$`FY26 ALOS`)
+        }
+        df$Zip <- as.character(df$Zip)
+        df
+      }
+    },
+    .id = "file"
+  ) |>
+  janitor::clean_names() |>
+  mutate(
+    fiscal_year = str_extract(file, "FY2\\d{1}"),
+    file_date = str_extract(file, "\\d{8}") |> lubridate::mdy(),
+    .keep = "unused"
+  ) |>
+  left_join(
+    file_pull_dates |> select(file_date, pull_date),
+    by = "file_date"
+  )
+
 removals <-
   fls |>
   set_names() |>
@@ -325,4 +384,9 @@ arrow::write_feather(
 arrow::write_feather(
   removals,
   "data/removals.feather"
+)
+
+arrow::write_feather(
+  detainees_by_facility,
+  "data/facilities.feather"
 )
