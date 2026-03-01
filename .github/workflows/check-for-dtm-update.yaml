@@ -1,12 +1,9 @@
 name: "Download and release latest DTM spreadsheet"
 
 on:
-  # schedule:
-  #   - cron: '0 5 * * 1' # every Monday at 05:00 UTC
+  schedule:
+    - cron: '*/15 * * * *' # every 15 minutes
   workflow_dispatch: # allow manual runs too
-  # push:
-  #   paths:
-  #     - 'code/ice-offices-scraper.R'
 
 permissions:
   contents: write
@@ -16,6 +13,9 @@ jobs:
 
   run-and-release:
     runs-on: macsilicon
+
+    env:
+      RENV_PATHS_LIBRARY: ~/renv-cache/ice-detention-management
 
     steps:
       - uses: actions/checkout@v4
