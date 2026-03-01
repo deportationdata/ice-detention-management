@@ -12,7 +12,7 @@ permissions:
 jobs:
 
   run-and-release:
-    runs-on: macOS
+    runs-on: [self-hosted, macOS]
 
     env:
       RENV_PATHS_LIBRARY: ~/renv-cache/ice-detention-management
