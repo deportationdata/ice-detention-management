@@ -10,10 +10,12 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
+
   run-and-release:
-    runs-on: self-hosted
+    runs-on: macsilicon
 
     steps:
       - uses: actions/checkout@v4
@@ -54,15 +56,26 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          
+
           if [ -n "$(git status --porcelain)" ]; then
             git add spreadsheets/ data/
             git commit -m "Update data via LFS [skip ci]"
-            
-            echo "Syncing with remote before push..."
-            git pull --rebase origin main 
 
-            git push
+            echo "Syncing with remote before push..."
+            git pull --rebase origin main
+
+            git push --set-upstream origin HEAD
           else
             echo "No changes to commit"
           fi
+
+      - name: Create pull request
+        if: steps.check_spreadsheets.outputs.new_files == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "Update DTM data $(date +%Y-%m-%d)" \
+            --body "Automated update: new DTM spreadsheet detected and parsed." \
+            --reviewer graemeblair \
+            --base main
