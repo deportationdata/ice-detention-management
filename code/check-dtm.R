@@ -34,32 +34,79 @@ EXPECTED_FILES <- c(
 
 # ── Expected columns per dataset ─────────────────────────────────────────────
 
-EXPECTED_COLS <- list(
+expected_cols <- list(
   `book-ins-by-arresting-agency` = c(
-    "arresting_agency", "n_book_ins_ytd", "fiscal_year",
-    "file_date", "pull_date", "month", "n_book_ins", "date"
+    "arresting_agency",
+    "n_book_ins_ytd",
+    "fiscal_year",
+    "file_date",
+    "pull_date",
+    "month",
+    "n_book_ins",
+    "date"
   ),
   `book-outs-by-reason` = c(
-    "release_reason", "criminality", "n_book_outs_ytd", "fiscal_year",
-    "file_date", "pull_date", "month", "n_book_outs", "date"
+    "release_reason",
+    "criminality",
+    "n_book_outs_ytd",
+    "fiscal_year",
+    "file_date",
+    "pull_date",
+    "month",
+    "n_book_outs",
+    "date"
   ),
   `adp-by-agency-criminality` = c(
-    "agency", "adp_fy_ytd", "fiscal_year",
-    "file_date", "pull_date", "month", "adp", "date"
+    "agency",
+    "adp_fy_ytd",
+    "fiscal_year",
+    "file_date",
+    "pull_date",
+    "month",
+    "adp",
+    "date"
   ),
   facilities = c(
-    "name", "address", "city", "state", "zip", "aor", "type_detailed",
-    "male_female", "fiscal_year", "file_date", "pull_date"
+    "name",
+    "address",
+    "city",
+    "state",
+    "zip",
+    "aor",
+    "type_detailed",
+    "male_female",
+    "fiscal_year",
+    "file_date",
+    "pull_date"
   ),
   removals = c("removals", "fiscal_year", "file_date", "pull_date"),
   `currently-detained-by-criminality` = c(
-    "criminality", "ice", "percent_ice", "cbp", "percent_cbp",
-    "total", "fiscal_year", "file_date", "pull_date"
+    "criminality",
+    "ice",
+    "percent_ice",
+    "cbp",
+    "percent_cbp",
+    "total",
+    "fiscal_year",
+    "file_date",
+    "pull_date"
   )
 )
 
-VALID_MONTHS <- c("Oct", "Nov", "Dec", "Jan", "Feb", "Mar",
-                   "Apr", "May", "Jun", "Jul", "Aug", "Sep")
+VALID_MONTHS <- c(
+  "Oct",
+  "Nov",
+  "Dec",
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep"
+)
 
 agents <- list()
 
@@ -77,17 +124,18 @@ agents$inventory <- inventory |>
     actions = action_levels(warn_at = 1, stop_at = 1)
   ) |>
   col_vals_equal(
-    columns = vars(present), value = TRUE,
+    columns = vars(present),
+    value = TRUE,
     label = "all expected parquet files present"
   ) |>
   interrogate()
 
 # ── 2. Schema checks ─────────────────────────────────────────────────────────
-# Verify expected columns exist in key datasets
+# Verify expected columns exist in datasets
 
-for (name in names(EXPECTED_COLS)) {
+for (name in names(expected_cols)) {
   df <- read_parquet(file.path("data", paste0(name, ".parquet")))
-  expected <- EXPECTED_COLS[[name]]
+  expected <- expected_cols[[name]]
   check_df <- tibble(column = expected, present = expected %in% names(df))
 
   agents[[paste0("schema_", name)]] <- check_df |>
@@ -96,7 +144,8 @@ for (name in names(EXPECTED_COLS)) {
       actions = action_levels(warn_at = 1, stop_at = 1)
     ) |>
     col_vals_equal(
-      columns = vars(present), value = TRUE,
+      columns = vars(present),
+      value = TRUE,
       label = "expected columns present"
     ) |>
     interrogate()
@@ -112,8 +161,11 @@ current_fy <- if (as.integer(format(Sys.Date(), "%m")) >= 10) {
 }
 
 fy_datasets <- c(
-  "book-ins-by-arresting-agency", "book-outs-by-reason",
-  "adp-by-agency-criminality", "removals", "facilities",
+  "book-ins-by-arresting-agency",
+  "book-outs-by-reason",
+  "adp-by-agency-criminality",
+  "removals",
+  "facilities",
   "currently-detained-by-criminality"
 )
 
@@ -128,11 +180,13 @@ agents$fiscal_year <- fy_df |>
     actions = action_levels(warn_at = 0.001, stop_at = 0.01)
   ) |>
   col_vals_gte(
-    columns = vars(fiscal_year), value = 2019,
+    columns = vars(fiscal_year),
+    value = 2019,
     label = "fiscal_year >= 2019"
   ) |>
   col_vals_lte(
-    columns = vars(fiscal_year), value = current_fy,
+    columns = vars(fiscal_year),
+    value = current_fy,
     label = glue("fiscal_year <= {current_fy}")
   ) |>
   col_vals_not_null(
@@ -159,7 +213,8 @@ agents$date_order <- date_df |>
     actions = action_levels(warn_at = 0.001, stop_at = 0.01)
   ) |>
   col_vals_gte(
-    columns = vars(file_date), value = min(date_df$pull_date, na.rm = TRUE),
+    columns = vars(file_date),
+    value = min(date_df$pull_date, na.rm = TRUE),
     label = "file_date is a plausible date"
   ) |>
   col_vals_not_null(
@@ -180,11 +235,15 @@ agents$nonneg_bookins <- bi |>
     actions = action_levels(warn_at = 1, stop_at = 1)
   ) |>
   col_vals_gte(
-    columns = vars(n_book_ins_ytd), value = 0, na_pass = TRUE,
+    columns = vars(n_book_ins_ytd),
+    value = 0,
+    na_pass = TRUE,
     label = "n_book_ins_ytd >= 0"
   ) |>
   col_vals_gte(
-    columns = vars(n_book_ins), value = 0, na_pass = TRUE,
+    columns = vars(n_book_ins),
+    value = 0,
+    na_pass = TRUE,
     label = "n_book_ins >= 0"
   ) |>
   interrogate()
@@ -195,11 +254,15 @@ agents$nonneg_bookouts <- bo |>
     actions = action_levels(warn_at = 1, stop_at = 1)
   ) |>
   col_vals_gte(
-    columns = vars(n_book_outs_ytd), value = 0, na_pass = TRUE,
+    columns = vars(n_book_outs_ytd),
+    value = 0,
+    na_pass = TRUE,
     label = "n_book_outs_ytd >= 0"
   ) |>
   col_vals_gte(
-    columns = vars(n_book_outs), value = 0, na_pass = TRUE,
+    columns = vars(n_book_outs),
+    value = 0,
+    na_pass = TRUE,
     label = "n_book_outs >= 0"
   ) |>
   interrogate()
@@ -211,7 +274,9 @@ agents$nonneg_removals <- rem |>
     actions = action_levels(warn_at = 1, stop_at = 1)
   ) |>
   col_vals_gte(
-    columns = vars(removals), value = 0, na_pass = TRUE,
+    columns = vars(removals),
+    value = 0,
+    na_pass = TRUE,
     label = "removals >= 0"
   ) |>
   interrogate()
@@ -256,11 +321,17 @@ agents$pct_bounds <- cd |>
     actions = action_levels(warn_at = 1, stop_at = 1)
   ) |>
   col_vals_between(
-    columns = vars(percent_ice), left = 0, right = 1, na_pass = TRUE,
+    columns = vars(percent_ice),
+    left = 0,
+    right = 1,
+    na_pass = TRUE,
     label = "percent_ice in [0, 1]"
   ) |>
   col_vals_between(
-    columns = vars(percent_cbp), left = 0, right = 1, na_pass = TRUE,
+    columns = vars(percent_cbp),
+    left = 0,
+    right = 1,
+    na_pass = TRUE,
     label = "percent_cbp in [0, 1]"
   ) |>
   interrogate()
@@ -282,7 +353,8 @@ agents$row_counts <- row_counts |>
     actions = action_levels(warn_at = 1, stop_at = 1)
   ) |>
   col_vals_gt(
-    columns = vars(n_rows), value = 0,
+    columns = vars(n_rows),
+    value = 0,
     label = "every dataset has at least one row"
   ) |>
   interrogate()
@@ -302,9 +374,24 @@ agents$facilities <- fac |>
   ) |>
   col_vals_in_set(
     columns = vars(type_detailed),
-    set = c("BOP", "CDF", "DIGSA", "DOD", "FAMILY", "FAMILY STAGING",
-            "IGSA", "JUVENILE", "MOC", "Other", "SPC", "STAGING",
-            "STATE", "TAP-ICE", "USMS CDF", "USMS IGA"),
+    set = c(
+      "BOP",
+      "CDF",
+      "DIGSA",
+      "DOD",
+      "FAMILY",
+      "FAMILY STAGING",
+      "IGSA",
+      "JUVENILE",
+      "MOC",
+      "Other",
+      "SPC",
+      "STAGING",
+      "STATE",
+      "TAP-ICE",
+      "USMS CDF",
+      "USMS IGA"
+    ),
     label = "facility type in expected set"
   ) |>
   interrogate()
@@ -312,7 +399,7 @@ agents$facilities <- fac |>
 # ── 10. Data freshness ───────────────────────────────────────────────────────
 # Latest file_date should be within 90 days of today
 
-MAX_LAG_DAYS <- 90
+max_lag_days <- 90
 
 freshness <- map_dfr(fy_datasets, \(name) {
   df <- read_parquet(file.path("data", paste0(name, ".parquet")))
@@ -329,8 +416,9 @@ agents$freshness <- freshness |>
     actions = action_levels(warn_at = 1, stop_at = 1)
   ) |>
   col_vals_lte(
-    columns = vars(lag_days), value = MAX_LAG_DAYS,
-    label = glue("latest data within {MAX_LAG_DAYS} days")
+    columns = vars(lag_days),
+    value = max_lag_days,
+    label = glue("latest data within {max_lag_days} days")
   ) |>
   interrogate()
 
@@ -344,16 +432,21 @@ md <- map_chr(agents, \(a) {
     transmute(
       status = if_else(all_passed, "PASS", "FAIL"),
       label,
-      detail = glue("n={format(n, big.mark=',')} failing={format(n_failed, big.mark=',')}")
+      detail = glue(
+        "n={format(n, big.mark=',')} failing={format(n_failed, big.mark=',')}"
+      )
     ) |>
     pmap_chr(\(status, label, detail) {
       icon <- if (status == "PASS") ":white_check_mark:" else ":x:"
       line <- glue("- {icon} **{status}** {label}")
-      if (status != "PASS") line <- glue("{line}  \n  {detail}")
+      if (status != "PASS") {
+        line <- glue("{line}  \n  {detail}")
+      }
       line
     })
   paste(c(header, rows), collapse = "\n")
-}) |> paste(collapse = "\n\n")
+}) |>
+  paste(collapse = "\n\n")
 
 overall <- if (all_pass) ":white_check_mark: **PASS**" else ":x: **FAIL**"
 md <- paste0("## Data validation: ", overall, "\n\n", md, "\n")
@@ -362,4 +455,6 @@ out_path <- Sys.getenv("CHECK_SUMMARY_PATH", "check-summary.md")
 writeLines(md, out_path)
 
 cat(md, "\n")
-if (!all_pass) stop("Some checks FAILED — see output above.", call. = FALSE)
+if (!all_pass) {
+  stop("Some checks FAILED — see output above.", call. = FALSE)
+}
