@@ -11,7 +11,7 @@ EXPECTED_FILES <- c(
   "atd-by-aor",
   "atd-court-appearances",
   "atd-population",
-  "avg-stay-length-by-agency-criminality",
+  "stay-length-by-agency-criminality",
   "book-ins-by-arresting-agency",
   "book-ins-by-facility-type",
   "book-outs-by-facility-type",
@@ -25,10 +25,10 @@ EXPECTED_FILES <- c(
   "fear-decision-time",
   "fear-decisions-by-facility-type",
   "iclos-and-detainees",
-  "monthly-bond-stats",
-  "monthly-segregation",
+  "bond-stats",
+  "segregation",
   "removals",
-  "semiannual",
+  "special-population-actions",
   "vulnerable-population"
 )
 
@@ -37,34 +37,34 @@ EXPECTED_FILES <- c(
 expected_cols <- list(
   `book-ins-by-arresting-agency` = c(
     "arresting_agency",
+    "month",
+    "date",
+    "n_book_ins",
     "n_book_ins_ytd",
     "fiscal_year",
     "file_date",
-    "pull_date",
-    "month",
-    "n_book_ins",
-    "date"
+    "pull_date"
   ),
   `book-outs-by-reason` = c(
     "release_reason",
     "criminality",
+    "month",
+    "date",
+    "n_book_outs",
     "n_book_outs_ytd",
     "fiscal_year",
     "file_date",
-    "pull_date",
-    "month",
-    "n_book_outs",
-    "date"
+    "pull_date"
   ),
   `adp-by-agency-criminality` = c(
     "agency",
+    "month",
+    "date",
+    "adp",
     "adp_fy_ytd",
     "fiscal_year",
     "file_date",
-    "pull_date",
-    "month",
-    "adp",
-    "date"
+    "pull_date"
   ),
   facilities = c(
     "name",
@@ -75,6 +75,12 @@ expected_cols <- list(
     "aor",
     "type_detailed",
     "male_female",
+    "level_a",
+    "level_b",
+    "level_c",
+    "level_d",
+    "male_crim",
+    "alos",
     "fiscal_year",
     "file_date",
     "pull_date"
@@ -147,6 +153,21 @@ for (name in names(expected_cols)) {
       columns = vars(present),
       value = TRUE,
       label = "expected columns present"
+    ) |>
+    interrogate()
+
+  # Column order check
+  order_ok <- identical(names(df), expected)
+  order_df <- tibble(dataset = name, correct_order = order_ok)
+  agents[[paste0("order_", name)]] <- order_df |>
+    create_agent(
+      label = glue("{name} — column order"),
+      actions = action_levels(warn_at = 1, stop_at = 1)
+    ) |>
+    col_vals_equal(
+      columns = vars(correct_order),
+      value = TRUE,
+      label = "columns in expected order"
     ) |>
     interrogate()
 }

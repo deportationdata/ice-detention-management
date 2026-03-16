@@ -6,7 +6,7 @@ library(readxl)
 library(glue)
 library(lubridate)
 
-fls <- list.files("spreadsheets", full.names = TRUE)
+fls <- list.files("spreadsheets", pattern = "\\.xlsx$", full.names = TRUE)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -144,7 +144,9 @@ book_ins_by_arresting_agency <-
   pivot_longer(cols = Oct:Sep, names_to = "month", values_to = "n_book_ins") |>
   rename(arresting_agency = Agency) |>
   add_fy_date_cols() |>
-  rename(n_book_ins_ytd = Total)
+  rename(n_book_ins_ytd = Total) |>
+  relocate(arresting_agency, month, date, n_book_ins, n_book_ins_ytd,
+           fiscal_year, file_date, pull_date)
 
 final_release_reasons_col_types <-
   c(
@@ -170,14 +172,18 @@ book_outs_by_reason <-
       sheet = sheet,
       range = glue("A{start_row+1}:O{start_row+26}"),
       col_types = final_release_reasons_col_types
-    )
+    ) |>
+      filter(!is.na(`Release Reason`) | !is.na(Criminality)) |>
+      fill(`Release Reason`)
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
   pivot_longer(cols = Oct:Sep, names_to = "month", values_to = "n_book_outs") |>
   add_fy_date_cols() |>
   rename(n_book_outs_ytd = Total) |>
-  janitor::clean_names()
+  janitor::clean_names() |>
+  relocate(release_reason, criminality, month, date, n_book_outs,
+           n_book_outs_ytd, fiscal_year, file_date, pull_date)
 
 # Older files (FY19-FY21) use a different format: annual totals by criminality columns
 book_outs_by_reason_annual <-
@@ -273,14 +279,17 @@ adp_by_agency_criminality <-
       sheet = sheet,
       range = glue("A{start_row+1}:N{start_row+13}"),
       col_types = monthly_col_types
-    )
+    ) |>
+      drop_na(1)
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
   pivot_longer(cols = Oct:Sep, names_to = "month", values_to = "adp") |>
   add_fy_date_cols() |>
   rename(adp_fy_ytd = `FY Overall`) |>
-  janitor::clean_names()
+  janitor::clean_names() |>
+  relocate(agency, month, date, adp, adp_fy_ytd,
+           fiscal_year, file_date, pull_date)
 
 avg_stay_length_by_agency_criminality <-
   safe_map(fls, \(.x) {
@@ -299,7 +308,8 @@ avg_stay_length_by_agency_criminality <-
       sheet = sheet,
       range = glue("A{start_row+1}:N{start_row+13}"),
       col_types = monthly_col_types
-    )
+    ) |>
+      drop_na(1)
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
@@ -310,7 +320,9 @@ avg_stay_length_by_agency_criminality <-
   ) |>
   add_fy_date_cols() |>
   rename(avg_stay_length_days_fy_ytd = `FY Overall`) |>
-  janitor::clean_names()
+  janitor::clean_names() |>
+  relocate(agency, month, date, avg_stay_length_days,
+           avg_stay_length_days_fy_ytd, fiscal_year, file_date, pull_date)
 
 detainees_by_facility <-
   safe_map(fls, \(.x) {
@@ -342,12 +354,27 @@ detainees_by_facility <-
     # coerce varying columns to character for consistent binding across years
     alos_cols <- grep("^FY\\d{2} ALOS$", colnames(df), value = TRUE)
     df[alos_cols] <- lapply(df[alos_cols], as.character)
+    df <- df |>
+      pivot_longer(all_of(alos_cols), values_to = "alos") |>
+      filter(!is.na(alos)) |>
+      select(-name)
     df$Zip <- as.character(df$Zip)
     df
   }) |>
   janitor::clean_names() |>
   left_join(file_pull_dates, by = "file") |>
-  select(-file)
+  select(-file) |>
+  mutate(
+    alos = as.numeric(alos),
+    male_female = if_else(
+      male_female %in% c("Male", "Female", "Female/Male"),
+      male_female,
+      NA_character_
+    ),
+    city = str_squish(city),
+    state = if_else(str_squish(state) == "", NA_character_, state)
+  ) |>
+  distinct()
 
 # Removals: anchored off row 27 "Book-Ins by Facility/Criminality"
 # P(anchor+1) = "Total" label, P(anchor+2) = removals count
@@ -437,7 +464,7 @@ fear_decision_time <-
       return(NULL)
     }
     # First col is release fiscal year label, rest are numeric
-    names(df)[1] <- "release_fiscal_year"
+    names(df)[1] <- "data_fiscal_year"
     num_cols <- names(df)[-1]
     if (length(num_cols) == 3) {
       names(df)[2:4] <- c("fsc", "adult", "total")
@@ -450,8 +477,8 @@ fear_decision_time <-
       df$fsc <- NA_real_
     }
     df |>
-      mutate(release_fiscal_year = parse_fy(release_fiscal_year)) |>
-      select(release_fiscal_year, fsc, adult, total)
+      mutate(data_fiscal_year = parse_fy(data_fiscal_year)) |>
+      select(data_fiscal_year, fsc, adult, total)
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
@@ -475,12 +502,17 @@ fear_decisions_by_facility_type <-
       range = glue("N{anchor[1]+1}:P{anchor[1]+4}")
     ) |>
       select(where(~ !all(is.na(.x))))
-    if (ncol(df) == 0 || nrow(df) == 0) {
+    if (ncol(df) < 2 || nrow(df) == 0) {
       return(NULL)
     }
     # Standardize column names
-    names(df) <- c("facility_type", "total_detained")[seq_len(ncol(df))]
+    names(df) <- c("facility_type", "total_detained")
     df$facility_type <- as.character(df$facility_type)
+    # Skip if facility_type contains only numbers (misaligned range)
+    valid <- df$facility_type[!is.na(df$facility_type)]
+    if (length(valid) == 0 || all(grepl("^[0-9]", valid))) {
+      return(NULL)
+    }
     df |> filter(!is.na(facility_type))
   }) |>
   left_join(file_pull_dates, by = "file") |>
@@ -666,7 +698,8 @@ atd_by_aor <-
     df |> filter(!is.na(aor_technology))
   }) |>
   left_join(file_pull_dates, by = "file") |>
-  select(-file)
+  select(-file) |>
+  distinct()
 
 # ATD court appearance data
 # Layout: header at [r, cc], then [r+1, cc]=Metric, [r+1, cc+1]=Count, [r+1, cc+2]=%
@@ -848,7 +881,8 @@ iclos_and_detainees <-
     bind_rows(all_rows)
   }) |>
   left_join(file_pull_dates, by = "file") |>
-  select(-file)
+  select(-file) |>
+  distinct()
 
 # ── New datasets: Monthly Bond Statistics ────────────────────────────────────
 
@@ -927,7 +961,9 @@ monthly_bond_stats <-
     bind_rows(results)
   }) |>
   left_join(file_pull_dates, by = "file") |>
-  select(-file)
+  select(-file) |>
+  mutate(month = month.abb[month(date)]) |>
+  relocate(month, date, metric, value, fiscal_year, file_date, pull_date)
 
 # ── New datasets: Monthly Segregation ────────────────────────────────────────
 
@@ -987,10 +1023,15 @@ monthly_segregation <-
       return(NULL)
     }
     bind_rows(results) |>
-      mutate(month_date = myd(paste0(month, " 1")))
+      mutate(
+        date = myd(paste0(month, " 1")),
+        month = month.abb[month(date)]
+      )
   }) |>
   left_join(file_pull_dates, by = "file") |>
-  select(-file)
+  select(-file) |>
+  relocate(month, date, facility, placement_count,
+           fiscal_year, file_date, pull_date)
 
 # ── New datasets: Semiannual ─────────────────────────────────────────────────
 
@@ -1185,7 +1226,16 @@ vulnerable_population <-
     bind_rows(results)
   }) |>
   left_join(file_pull_dates, by = "file") |>
-  select(-file)
+  select(-file) |>
+  filter(placement_reason != "_unique_detainees") |>
+  mutate(
+    data_fiscal_year = as.integer(str_extract(fy_quarter, "\\d{4}")),
+    data_quarter = as.integer(str_extract(fy_quarter, "(?<=Quarter )\\d"))
+  ) |>
+  select(-fy_quarter) |>
+  relocate(placement_reason, data_fiscal_year, data_quarter,
+           n_placements, avg_consecutive_days, avg_cumulative_days,
+           fiscal_year, file_date, pull_date)
 
 # ── Write outputs ─────────────────────────────────────────────────────────────
 
@@ -1211,7 +1261,7 @@ arrow::write_parquet(
 )
 arrow::write_parquet(
   avg_stay_length_by_agency_criminality,
-  "data/avg-stay-length-by-agency-criminality.parquet"
+  "data/stay-length-by-agency-criminality.parquet"
 )
 arrow::write_parquet(removals, "data/removals.parquet")
 arrow::write_parquet(detainees_by_facility, "data/facilities.parquet")
@@ -1252,13 +1302,13 @@ arrow::write_parquet(
 arrow::write_parquet(iclos_and_detainees, "data/iclos-and-detainees.parquet")
 
 # Monthly Bond Statistics
-arrow::write_parquet(monthly_bond_stats, "data/monthly-bond-stats.parquet")
+arrow::write_parquet(monthly_bond_stats, "data/bond-stats.parquet")
 
 # Monthly Segregation
-arrow::write_parquet(monthly_segregation, "data/monthly-segregation.parquet")
+arrow::write_parquet(monthly_segregation, "data/segregation.parquet")
 
 # Semiannual
-arrow::write_parquet(semiannual_data, "data/semiannual.parquet")
+arrow::write_parquet(semiannual_data, "data/special-population-actions.parquet")
 
 # Vulnerable & Special Population
 arrow::write_parquet(

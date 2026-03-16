@@ -1,0 +1,6 @@
+FY22_detentionStats08312022.xlsx was deleted — it was byte-identical to
+FY22_detentionStats08192022.xlsx (MD5: 0fe8634ed94d1492ac270f2753d532c5).
+
+Both files have an internal IIDS pull date of 08/14/2022, which aligns with
+the 08/19 filename. The 08/31 filename appears to be a mislabeled copy with
+no distinct data pull behind it.
