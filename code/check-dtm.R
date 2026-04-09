@@ -1,6 +1,6 @@
 library(dplyr)
 library(purrr)
-library(arrow)
+library(nanoparquet)
 library(glue)
 library(pointblank)
 

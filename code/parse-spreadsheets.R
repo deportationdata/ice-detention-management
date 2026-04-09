@@ -1242,76 +1242,76 @@ vulnerable_population <-
 dir.create("data", showWarnings = FALSE, recursive = TRUE)
 
 # Original datasets
-arrow::write_parquet(
+nanoparquet::write_parquet(
   book_ins_by_arresting_agency,
   "data/book-ins-by-arresting-agency.parquet"
 )
-arrow::write_parquet(book_outs_by_reason, "data/book-outs-by-reason.parquet")
-arrow::write_parquet(
+nanoparquet::write_parquet(book_outs_by_reason, "data/book-outs-by-reason.parquet")
+nanoparquet::write_parquet(
   book_outs_by_reason_annual,
   "data/book-outs-by-reason-annual.parquet"
 )
-arrow::write_parquet(
+nanoparquet::write_parquet(
   book_outs_by_reason_all_years,
   "data/book-outs-by-reason-all-years.parquet"
 )
-arrow::write_parquet(
+nanoparquet::write_parquet(
   adp_by_agency_criminality,
   "data/adp-by-agency-criminality.parquet"
 )
-arrow::write_parquet(
+nanoparquet::write_parquet(
   avg_stay_length_by_agency_criminality,
   "data/stay-length-by-agency-criminality.parquet"
 )
-arrow::write_parquet(removals, "data/removals.parquet")
-arrow::write_parquet(detainees_by_facility, "data/facilities.parquet")
+nanoparquet::write_parquet(removals, "data/removals.parquet")
+nanoparquet::write_parquet(detainees_by_facility, "data/facilities.parquet")
 
 # New Detention sheet datasets
-arrow::write_parquet(
+nanoparquet::write_parquet(
   currently_detained_by_disposition,
   "data/currently-detained-by-disposition.parquet"
 )
-arrow::write_parquet(fear_decision_time, "data/fear-decision-time.parquet")
-arrow::write_parquet(
+nanoparquet::write_parquet(fear_decision_time, "data/fear-decision-time.parquet")
+nanoparquet::write_parquet(
   fear_decisions_by_facility_type,
   "data/fear-decisions-by-facility-type.parquet"
 )
-arrow::write_parquet(
+nanoparquet::write_parquet(
   currently_detained_by_criminality,
   "data/currently-detained-by-criminality.parquet"
 )
-arrow::write_parquet(
+nanoparquet::write_parquet(
   book_ins_by_facility_type,
   "data/book-ins-by-facility-type.parquet"
 )
-arrow::write_parquet(
+nanoparquet::write_parquet(
   book_outs_by_facility_type,
   "data/book-outs-by-facility-type.parquet"
 )
-arrow::write_parquet(famu_removals, "data/famu-removals.parquet")
+nanoparquet::write_parquet(famu_removals, "data/famu-removals.parquet")
 
 # ATD datasets
-arrow::write_parquet(atd_population, "data/atd-population.parquet")
-arrow::write_parquet(atd_by_aor, "data/atd-by-aor.parquet")
-arrow::write_parquet(
+nanoparquet::write_parquet(atd_population, "data/atd-population.parquet")
+nanoparquet::write_parquet(atd_by_aor, "data/atd-by-aor.parquet")
+nanoparquet::write_parquet(
   atd_court_appearances,
   "data/atd-court-appearances.parquet"
 )
 
 # ICLOS and Detainees
-arrow::write_parquet(iclos_and_detainees, "data/iclos-and-detainees.parquet")
+nanoparquet::write_parquet(iclos_and_detainees, "data/iclos-and-detainees.parquet")
 
 # Monthly Bond Statistics
-arrow::write_parquet(monthly_bond_stats, "data/bond-stats.parquet")
+nanoparquet::write_parquet(monthly_bond_stats, "data/bond-stats.parquet")
 
 # Monthly Segregation
-arrow::write_parquet(monthly_segregation, "data/segregation.parquet")
+nanoparquet::write_parquet(monthly_segregation, "data/segregation.parquet")
 
 # Semiannual
-arrow::write_parquet(semiannual_data, "data/special-population-actions.parquet")
+nanoparquet::write_parquet(semiannual_data, "data/special-population-actions.parquet")
 
 # Vulnerable & Special Population
-arrow::write_parquet(
+nanoparquet::write_parquet(
   vulnerable_population,
   "data/vulnerable-population.parquet"
 )

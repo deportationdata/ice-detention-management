@@ -36,8 +36,6 @@ jobs:
       - uses: r-lib/actions/setup-renv@v2
 
       - name: Download data
-        env:
-          LIBARROW_BINARY: "true"
         run: |
           mkdir -p inputs
           Rscript code/download-new-dtm.R
