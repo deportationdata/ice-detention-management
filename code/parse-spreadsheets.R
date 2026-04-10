@@ -1315,3 +1315,11 @@ nanoparquet::write_parquet(
   vulnerable_population,
   "data/vulnerable-population.parquet"
 )
+
+# ── Also write xlsx and dta versions of every parquet file ───────────────────
+for (pq in list.files("data", pattern = "\\.parquet$", full.names = TRUE)) {
+  df <- nanoparquet::read_parquet(pq)
+  base <- tools::file_path_sans_ext(pq)
+  writexl::write_xlsx(df, paste0(base, ".xlsx"))
+  haven::write_dta(df, paste0(base, ".dta"))
+}
