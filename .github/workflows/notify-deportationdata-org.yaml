@@ -1,0 +1,39 @@
+name: Notify deportationdata.org of DTM update
+
+# When a new DTM spreadsheet (or its parsed data) lands on main, poke
+# deportationdata.org so its update-dtm.yml appends the new entry to
+# data/datasets.R. Uses the `ddo-bot` GitHub App installed on
+# deportationdata.org; the App is NOT installed on this repo — we just
+# hold its secrets here and mint a cross-repo installation token.
+#
+# Required repo secrets:
+#   - DDO_BOT_APP_ID       (same value as in deportationdata.org)
+#   - DDO_BOT_PRIVATE_KEY  (same value as in deportationdata.org)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'spreadsheets/**'
+      - 'data/**'
+  workflow_dispatch:
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate App token scoped to deportationdata.org
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DDO_BOT_APP_ID }}
+          private-key: ${{ secrets.DDO_BOT_PRIVATE_KEY }}
+          owner: deportationdata
+          repositories: deportationdata.org
+
+      - name: Dispatch dtm-updated event
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh api -X POST repos/deportationdata/deportationdata.org/dispatches \
+            -f event_type=dtm-updated
