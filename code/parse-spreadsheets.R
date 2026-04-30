@@ -8,13 +8,47 @@ library(lubridate)
 
 fls <- list.files("spreadsheets", pattern = "\\.xlsx$", full.names = TRUE)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# Per-file (file, pattern) pairs to skip — the sheet matching `pattern` in
+# `file` contains data from a different fiscal year than the filename claims,
+# so reading it would mis-tag rows. Each row in this table tells get_sheet
+# to return NA for that combination.
+sheet_skiplist <- tibble::tribble(
+  ~file,                              ~pattern,
+  # Detention sheet here is a stale 06/20/2020 (FY20) snapshot — ATD/Facilities
+  # in this file are correctly FY21 and stay.
+  "FY21_detentionStats060921.xlsx",   "^Detention",
+  # Forward-looking FY24 content sitting inside an FY23-named workbook —
+  # Detention/Facilities are correctly FY23 EOFY and stay.
+  "FY23_detentionStats.xlsx",         "^ATD",
+  "FY23_detentionStats.xlsx",         "ICLOS|Detainee",
+  "FY23_detentionStats.xlsx",         "Bond",
+  "FY23_detentionStats.xlsx",         "Semiannual",
+  "FY23_detentionStats.xlsx",         "Vulnerable"
+)
 
 get_sheet <- function(path, pattern) {
+  if (any(sheet_skiplist$file == basename(path) & sheet_skiplist$pattern == pattern)) {
+    return(NA_character_)
+  }
   shts <- excel_sheets(path)
-  shts[str_detect(shts, pattern)][1]
+  matches <- shts[str_detect(shts, pattern)]
+  if (length(matches) == 0) return(NA_character_)
+  # Drop EOFY archive sheets unless the EOFY year matches the filename FY —
+  # i.e. keep "Detention EOFY2020" inside FY20-detentionstats.xlsx (canonical
+  # source of FY20 data) but drop it inside FY21/FY23/FY26 files where it's a
+  # stale duplicate of FY20.
+  file_fy <- as.integer(str_extract(basename(path), "(?<=FY)\\d{2}"))
+  if (!is.na(file_fy)) file_fy <- file_fy + 2000L
+  eofy_year <- as.integer(str_extract(matches, "(?<=EOFY)\\d{2,4}"))
+  eofy_year <- if_else(!is.na(eofy_year) & eofy_year < 100L,
+                       eofy_year + 2000L, eofy_year)
+  is_eofy <- str_detect(matches, "EOFY")
+  matches <- matches[!is_eofy | (!is.na(file_fy) & eofy_year == file_fy)]
+  if (length(matches) == 0) return(NA_character_)
+  # Among the remainder prefer non-EOFY in case of ties.
+  non_eofy <- matches[!str_detect(matches, "EOFY")]
+  if (length(non_eofy) > 0) non_eofy[1] else matches[1]
 }
-
 
 find_table_start <- function(path, sheet, pattern) {
   df <- read_excel(
@@ -30,7 +64,6 @@ read_col_a <- function(path, sheet) {
   read_excel(path, sheet = sheet, range = cell_cols("A"), col_names = FALSE)
 }
 
-# Map over files, returning NULL on error (skips gracefully)
 safe_map <- function(fls, fn) {
   result <- fls |>
     set_names() |>
@@ -41,13 +74,11 @@ safe_map <- function(fls, fn) {
   result
 }
 
-# Parse any FY string to integer: "FY24" -> 2024, "FY2024" -> 2024
 parse_fy <- function(x) {
   digits <- as.integer(str_extract(x, "\\d+"))
   if_else(digits < 100L, digits + 2000L, digits)
 }
 
-# Add date column to monthly pivoted datasets (fiscal_year is integer)
 add_fy_date_cols <- function(df) {
   df |>
     mutate(
@@ -57,19 +88,54 @@ add_fy_date_cols <- function(df) {
     mutate(date = make_date(cy, month_num, 1L), .keep = "unused")
 }
 
-# Shared col types for single-text-column monthly tables (text + Oct-Sep + Total)
+# text + Oct-Sep + Total
 monthly_col_types <- c("text", rep("numeric", 13))
 
-# ── Pull dates ────────────────────────────────────────────────────────────────
+# Generic extractor: find sheet + anchor row, read offset range, post-process.
+# `range` is a function of the anchor row index.
+extract_table <- function(
+  path,
+  sheet_pattern,
+  anchor_pattern,
+  range,
+  col_types = NULL,
+  col_names = TRUE,
+  na = "",
+  post = identity,
+  skip_if = NULL
+) {
+  sheet <- get_sheet(path, sheet_pattern)
+  if (is.na(sheet)) {
+    return(NULL)
+  }
+  if (!is.null(skip_if) && isTRUE(skip_if(path, sheet))) {
+    return(NULL)
+  }
+  anchor <- find_table_start(path, sheet, anchor_pattern)
+  if (length(anchor) == 0) {
+    return(NULL)
+  }
+  read_excel(
+    path,
+    sheet = sheet,
+    range = range(anchor[1]),
+    col_types = col_types,
+    col_names = col_names,
+    na = na
+  ) |>
+    post()
+}
 
 file_pull_dates <-
   fls |>
   set_names() |>
   map_dfr(
     ~ {
+      sheet <- get_sheet(.x, "^Facilities")
+      if (is.na(sheet)) return(NULL)
       read_excel(
         .x,
-        sheet = get_sheet(.x, "^Facilities"),
+        sheet = sheet,
         range = "A1:A7",
         col_names = "file_pull_date"
       ) |>
@@ -84,9 +150,7 @@ file_pull_dates <-
     date_str = str_extract_all(file, "\\d{6,8}") |>
       map_chr(~ dplyr::last(.x, default = NA_character_)),
 
-    # parse:
-    # - 8 digits: assume MMDDYYYY
-    # - 6 digits: if first two <= 12 => MMDDYY, else => YYMMDD
+    # 8 digits => MMDDYYYY; 6 digits => MMDDYY if leading mm<=12 else YYMMDD
     date_raw = map(date_str, \(ds) {
       if (is.na(ds)) {
         return(as.Date(NA))
@@ -113,29 +177,14 @@ file_pull_dates <-
   ) |>
   select(file, fiscal_year, file_date, pull_date)
 
-# ── Existing datasets (with bug fixes) ───────────────────────────────────────
-
-# Book-ins by agency: header is in column I (not A), anchored off row 18
-# "ICE Currently Detained by Criminality" at A18, "Agency" header at I19
+# "Currently Detained by Criminality" anchor at A; agency table sits at I(anchor+1):V(anchor+4)
 book_ins_by_arresting_agency <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    anchor <- find_table_start(
+    extract_table(
       .x,
-      sheet,
-      "Currently Detained by Criminality"
-    )
-    if (length(anchor) == 0) {
-      warning(glue(
-        "  [book_ins] Anchor header not found in {basename(.x)}"
-      ))
-      return(NULL)
-    }
-    # Agency header is at I(anchor+1), data at I(anchor+2):V(anchor+4)
-    read_excel(
-      .x,
-      sheet = sheet,
-      range = glue("I{anchor[1]+1}:V{anchor[1]+4}"),
+      sheet_pattern = "^Detention",
+      anchor_pattern = "Currently Detained by Criminality",
+      range = \(r) glue("I{r+1}:V{r+4}"),
       col_types = c("text", rep("numeric", 13))
     )
   }) |>
@@ -145,36 +194,31 @@ book_ins_by_arresting_agency <-
   rename(arresting_agency = Agency) |>
   add_fy_date_cols() |>
   rename(n_book_ins_ytd = Total) |>
-  relocate(arresting_agency, month, date, n_book_ins, n_book_ins_ytd,
-           fiscal_year, file_date, pull_date)
-
-final_release_reasons_col_types <-
-  c(
-    "text", # Release Reason
-    "text", # Criminality
-    rep("numeric", 13) # Oct-Sep + Total
+  relocate(
+    arresting_agency,
+    month,
+    date,
+    n_book_ins,
+    n_book_ins_ytd,
+    fiscal_year,
+    file_date,
+    pull_date
   )
 
 book_outs_by_reason <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    start_row <- find_table_start(
+    extract_table(
       .x,
-      sheet,
-      "ICE Final (Book Outs|Releases) by Release Reason, Month and Criminality"
+      sheet_pattern = "^Detention",
+      anchor_pattern = "ICE Final (Book Outs|Releases) by Release Reason, Month and Criminality",
+      range = \(r) glue("A{r+1}:O{r+26}"),
+      col_types = c("text", "text", rep("numeric", 13)),
+      post = \(df) {
+        df |>
+          filter(!is.na(`Release Reason`) | !is.na(Criminality)) |>
+          fill(`Release Reason`)
+      }
     )
-    if (length(start_row) == 0) {
-      # Older files (FY19-FY21) have a different format without monthly columns
-      return(NULL)
-    }
-    read_excel(
-      .x,
-      sheet = sheet,
-      range = glue("A{start_row+1}:O{start_row+26}"),
-      col_types = final_release_reasons_col_types
-    ) |>
-      filter(!is.na(`Release Reason`) | !is.na(Criminality)) |>
-      fill(`Release Reason`)
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
@@ -182,52 +226,55 @@ book_outs_by_reason <-
   add_fy_date_cols() |>
   rename(n_book_outs_ytd = Total) |>
   janitor::clean_names() |>
-  relocate(release_reason, criminality, month, date, n_book_outs,
-           n_book_outs_ytd, fiscal_year, file_date, pull_date)
+  relocate(
+    release_reason,
+    criminality,
+    month,
+    date,
+    n_book_outs,
+    n_book_outs_ytd,
+    fiscal_year,
+    file_date,
+    pull_date
+  )
 
-# Older files (FY19-FY21) use a different format: annual totals by criminality columns
+# Older files (FY19-FY21): annual totals by criminality columns instead of monthly
 book_outs_by_reason_annual <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    # Only use this for files that DON'T have the monthly format
-    monthly_row <- find_table_start(
+    extract_table(
       .x,
-      sheet,
-      "ICE Final (Book Outs|Releases) by Release Reason, Month and Criminality"
+      sheet_pattern = "^Detention",
+      anchor_pattern = "ICE Final (Book Outs|Releases) by Release Reason",
+      range = \(r) glue("A{r+1}:E{r+9}"),
+      col_types = c("text", rep("numeric", 4)),
+      skip_if = \(p, s) {
+        length(find_table_start(
+          p,
+          s,
+          "ICE Final (Book Outs|Releases) by Release Reason, Month and Criminality"
+        )) >
+          0
+      },
+      post = \(df) {
+        # rename must run per-file so map_dfr can bind on consistent column names
+        names(df) <- c(
+          "release_reason",
+          "convicted_criminal",
+          "pending_criminal_charges",
+          "other_immigration_violator",
+          "total"
+        )
+        df
+      }
     )
-    if (length(monthly_row) > 0) {
-      return(NULL)
-    }
-    start_row <- find_table_start(
-      .x,
-      sheet,
-      "ICE Final (Book Outs|Releases) by Release Reason"
-    )
-    if (length(start_row) == 0) {
-      return(NULL)
-    }
-    df <- read_excel(
-      .x,
-      sheet = sheet,
-      range = glue("A{start_row[1]+1}:E{start_row[1]+9}"),
-      col_types = c("text", rep("numeric", 4))
-    )
-    names(df) <- c(
-      "release_reason",
-      "convicted_criminal",
-      "pending_criminal_charges",
-      "other_immigration_violator",
-      "total"
-    )
-    df |> filter(!is.na(release_reason))
   }) |>
+  filter(!is.na(release_reason)) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# Unified annual book outs: combine both formats into one long-format annual dataset
 book_outs_annual_from_monthly <-
   book_outs_by_reason |>
-  filter(month == "Oct") |> # one row per release_reason x criminality x file
+  filter(month == "Oct") |>
   select(
     release_reason,
     criminality,
@@ -264,55 +311,45 @@ book_outs_by_reason_all_years <-
 
 adp_by_agency_criminality <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    start_row <- find_table_start(
+    extract_table(
       .x,
-      sheet,
-      "ICE Average Daily Population by Arresting Agency, Month and Criminality"
-    )
-    if (length(start_row) == 0) {
-      warning(glue("  [adp] Table header not found in {basename(.x)}"))
-      return(NULL)
-    }
-    read_excel(
-      .x,
-      sheet = sheet,
-      range = glue("A{start_row+1}:N{start_row+13}"),
+      sheet_pattern = "^Detention",
+      anchor_pattern = "ICE Average Daily Population by Arresting Agency, Month and Criminality",
+      range = \(r) glue("A{r+1}:N{r+13}"),
       col_types = monthly_col_types
-    ) |>
-      drop_na(1)
+    )
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
+  drop_na(Agency) |>
   pivot_longer(cols = Oct:Sep, names_to = "month", values_to = "adp") |>
   add_fy_date_cols() |>
   rename(adp_fy_ytd = `FY Overall`) |>
   janitor::clean_names() |>
-  relocate(agency, month, date, adp, adp_fy_ytd,
-           fiscal_year, file_date, pull_date)
+  relocate(
+    agency,
+    month,
+    date,
+    adp,
+    adp_fy_ytd,
+    fiscal_year,
+    file_date,
+    pull_date
+  )
 
 avg_stay_length_by_agency_criminality <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    start_row <- find_table_start(
+    extract_table(
       .x,
-      sheet,
-      "ICE Average Length of Stay by Arresting Agency, Month and Criminality"
-    )
-    if (length(start_row) == 0) {
-      warning(glue("  [alos] Table header not found in {basename(.x)}"))
-      return(NULL)
-    }
-    read_excel(
-      .x,
-      sheet = sheet,
-      range = glue("A{start_row+1}:N{start_row+13}"),
+      sheet_pattern = "^Detention",
+      anchor_pattern = "ICE Average Length of Stay by Arresting Agency, Month and Criminality",
+      range = \(r) glue("A{r+1}:N{r+13}"),
       col_types = monthly_col_types
-    ) |>
-      drop_na(1)
+    )
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
+  drop_na(Agency) |>
   pivot_longer(
     cols = Oct:Sep,
     names_to = "month",
@@ -321,12 +358,21 @@ avg_stay_length_by_agency_criminality <-
   add_fy_date_cols() |>
   rename(avg_stay_length_days_fy_ytd = `FY Overall`) |>
   janitor::clean_names() |>
-  relocate(agency, month, date, avg_stay_length_days,
-           avg_stay_length_days_fy_ytd, fiscal_year, file_date, pull_date)
+  relocate(
+    agency,
+    month,
+    date,
+    avg_stay_length_days,
+    avg_stay_length_days_fy_ytd,
+    fiscal_year,
+    file_date,
+    pull_date
+  )
 
 detainees_by_facility <-
   safe_map(fls, \(.x) {
     sheet <- get_sheet(.x, "^Facilities")
+    if (is.na(sheet)) return(NULL)
     col_a <- read_col_a(.x, sheet)
     start_row <- which(!is.na(col_a[[1]]) & str_detect(col_a[[1]], "^Name"))
     end_row <- nrow(col_a)
@@ -334,24 +380,20 @@ detainees_by_facility <-
       warning(glue("  [facilities] Header row not found in {basename(.x)}"))
       return(NULL)
     }
-    # If the row after "Name" is also a header-like row (e.g. a second header),
-    # detect structurally instead of special-casing individual files
+    sr <- start_row[1]
+    # If row sr+1 is a second "Name" header, advance one row
     test_row <- read_excel(
       .x,
       sheet = sheet,
-      range = glue("A{start_row + 1}:A{start_row + 1}"),
+      range = glue("A{sr + 1}:A{sr + 1}"),
       col_names = FALSE
     )
     if (!is.na(test_row[[1]]) && str_detect(test_row[[1]], "^Name")) {
-      start_row <- start_row + 1
+      sr <- sr + 1
     }
-    df <- read_excel(
-      .x,
-      sheet = sheet,
-      range = glue("A{start_row}:N{end_row}")
-    ) |>
+    df <- read_excel(.x, sheet = sheet, range = glue("A{sr}:N{end_row}")) |>
       filter(!is.na(Name))
-    # coerce varying columns to character for consistent binding across years
+    # coerce ALOS columns to character so years bind together cleanly
     alos_cols <- grep("^FY\\d{2} ALOS$", colnames(df), value = TRUE)
     df[alos_cols] <- lapply(df[alos_cols], as.character)
     df <- df |>
@@ -376,165 +418,119 @@ detainees_by_facility <-
   ) |>
   distinct()
 
-# Removals: anchored off row 27 "Book-Ins by Facility/Criminality"
-# P(anchor+1) = "Total" label, P(anchor+2) = removals count
+# "Book-Ins by Facility/Criminality" anchor; the cell at P(anchor+2) is the
+# fiscal-year-to-date cumulative removals total — one row per snapshot file,
+# count is as of pull_date (not file_date).
 removals <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    anchor <- find_table_start(.x, sheet, "Book-Ins by")
-    if (length(anchor) == 0) {
-      warning(glue(
-        "  [removals] Anchor header not found in {basename(.x)}"
-      ))
-      return(NULL)
-    }
-    read_excel(
+    extract_table(
       .x,
-      sheet = sheet,
-      range = glue("P{anchor[1]+2}:P{anchor[1]+2}"),
-      col_names = "removals",
+      sheet_pattern = "^Detention",
+      anchor_pattern = "Book-Ins by",
+      range = \(r) glue("P{r+2}:P{r+2}"),
+      col_names = "n_removals_fy_ytd",
       col_types = "numeric"
     )
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# ── New datasets: Detention sheet tables ─────────────────────────────────────
-
-# Currently Detained by Processing Disposition and Detention Facility Type
-# Always at row 8 in column A; data at rows 9-14 (header + 5 data rows)
+# Disposition table at A(anchor+1):D(anchor+5)
 currently_detained_by_disposition <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    start_row <- find_table_start(
+    extract_table(
       .x,
-      sheet,
-      "Currently Detained by Processing Disposition"
-    )
-    if (length(start_row) == 0) {
-      return(NULL)
-    }
-    df <- read_excel(
-      .x,
-      sheet = sheet,
-      range = glue("A{start_row[1]+1}:D{start_row[1]+5}"),
+      sheet_pattern = "^Detention",
+      anchor_pattern = "Currently Detained by Processing Disposition",
+      range = \(r) glue("A{r+1}:D{r+5}"),
       col_types = c("text", "numeric", "numeric", "numeric"),
-      na = c("", "-")
+      na = c("", "-"),
+      post = \(df) {
+        names(df)[1] <- "disposition"
+        df <- df |> select(-starts_with("..."))
+        num_cols <- setdiff(names(df), "disposition")
+        if (length(num_cols) >= 2) {
+          names(df)[2:min(4, ncol(df))] <- c(
+            "fsc_frc",
+            "adult",
+            "total"
+          )[seq_along(num_cols)]
+        }
+        df
+      }
     )
-    # Standardize: rename first col, drop any unnamed cols (e.g. ...4)
-    names(df)[1] <- "disposition"
-    df <- df |> select(-starts_with("..."))
-    # Ensure consistent 3-col output: disposition + up to 2 numeric cols
-    # Rename numeric cols to generic names for consistency across years
-    num_cols <- setdiff(names(df), "disposition")
-    if (length(num_cols) >= 2) {
-      # Has FSC/FRC + Adult + Total (or similar)
-      names(df)[2:min(4, ncol(df))] <- c(
-        "fsc_frc",
-        "adult",
-        "total"
-      )[seq_along(num_cols)]
-    }
-    df
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# Average Time from USCIS Fear Decision to ICE Release
-# Header at G(anchor), data at G(anchor+1):K(anchor+2)
-# Cols: ICE Release Fiscal Year | (gap) | FSC | Adult | Total
+# G(anchor+1):K(anchor+2) — release fiscal year + (gap) + FSC | Adult | Total
 fear_decision_time <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    anchor <- find_table_start(
+    extract_table(
       .x,
-      sheet,
-      "Currently Detained by Processing Disposition"
+      sheet_pattern = "^Detention",
+      anchor_pattern = "Currently Detained by Processing Disposition",
+      range = \(r) glue("G{r+1}:K{r+2}"),
+      post = \(df) {
+        df <- df |> select(where(~ !all(is.na(.x))))
+        if (ncol(df) == 0 || nrow(df) == 0) {
+          return(NULL)
+        }
+        names(df)[1] <- "data_fiscal_year"
+        num_cols <- names(df)[-1]
+        if (length(num_cols) == 3) {
+          names(df)[2:4] <- c("fsc", "adult", "total")
+        } else if (length(num_cols) == 2) {
+          names(df)[2:3] <- c("adult", "total")
+          df$fsc <- NA_real_
+        } else if (length(num_cols) == 1) {
+          names(df)[2] <- "total"
+          df$adult <- NA_real_
+          df$fsc <- NA_real_
+        }
+        df |>
+          mutate(data_fiscal_year = parse_fy(data_fiscal_year)) |>
+          select(data_fiscal_year, fsc, adult, total)
+      }
     )
-    if (length(anchor) == 0) {
-      return(NULL)
-    }
-    df <- read_excel(
-      .x,
-      sheet = sheet,
-      range = glue("G{anchor[1]+1}:K{anchor[1]+2}")
-    ) |>
-      select(where(~ !all(is.na(.x))))
-    if (ncol(df) == 0 || nrow(df) == 0) {
-      return(NULL)
-    }
-    # First col is release fiscal year label, rest are numeric
-    names(df)[1] <- "data_fiscal_year"
-    num_cols <- names(df)[-1]
-    if (length(num_cols) == 3) {
-      names(df)[2:4] <- c("fsc", "adult", "total")
-    } else if (length(num_cols) == 2) {
-      names(df)[2:3] <- c("adult", "total")
-      df$fsc <- NA_real_
-    } else if (length(num_cols) == 1) {
-      names(df)[2] <- "total"
-      df$adult <- NA_real_
-      df$fsc <- NA_real_
-    }
-    df |>
-      mutate(data_fiscal_year = parse_fy(data_fiscal_year)) |>
-      select(data_fiscal_year, fsc, adult, total)
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# Aliens with USCIS-Established Fear Decisions by Facility Type
-# Header at N(anchor), data: N(anchor+1)=header, N(anchor+2):P(anchor+4)=data
+# N(anchor+1):P(anchor+4)
 fear_decisions_by_facility_type <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    anchor <- find_table_start(
+    extract_table(
       .x,
-      sheet,
-      "Currently Detained by Processing Disposition"
+      sheet_pattern = "^Detention",
+      anchor_pattern = "Currently Detained by Processing Disposition",
+      range = \(r) glue("N{r+1}:P{r+4}"),
+      post = \(df) {
+        df <- df |> select(where(~ !all(is.na(.x))))
+        if (ncol(df) < 2 || nrow(df) == 0) {
+          return(NULL)
+        }
+        names(df) <- c("facility_type", "total_detained")
+        df$facility_type <- as.character(df$facility_type)
+        # Skip if facility_type only contains numbers (range was misaligned)
+        valid <- df$facility_type[!is.na(df$facility_type)]
+        if (length(valid) == 0 || all(grepl("^[0-9]", valid))) {
+          return(NULL)
+        }
+        filter(df, !is.na(facility_type))
+      }
     )
-    if (length(anchor) == 0) {
-      return(NULL)
-    }
-    df <- read_excel(
-      .x,
-      sheet = sheet,
-      range = glue("N{anchor[1]+1}:P{anchor[1]+4}")
-    ) |>
-      select(where(~ !all(is.na(.x))))
-    if (ncol(df) < 2 || nrow(df) == 0) {
-      return(NULL)
-    }
-    # Standardize column names
-    names(df) <- c("facility_type", "total_detained")
-    df$facility_type <- as.character(df$facility_type)
-    # Skip if facility_type contains only numbers (misaligned range)
-    valid <- df$facility_type[!is.na(df$facility_type)]
-    if (length(valid) == 0 || all(grepl("^[0-9]", valid))) {
-      return(NULL)
-    }
-    df |> filter(!is.na(facility_type))
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# Currently Detained by Criminality and Arresting Agency
-# Always at row 18 in column A
 currently_detained_by_criminality <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    start_row <- find_table_start(
+    extract_table(
       .x,
-      sheet,
-      "Currently Detained by Criminality"
-    )
-    if (length(start_row) == 0) {
-      return(NULL)
-    }
-    read_excel(
-      .x,
-      sheet = sheet,
-      range = glue("A{start_row[1]+1}:F{start_row[1]+4}"),
+      sheet_pattern = "^Detention",
+      anchor_pattern = "Currently Detained by Criminality",
+      range = \(r) glue("A{r+1}:F{r+4}"),
       col_types = c("text", rep("numeric", 5))
     )
   }) |>
@@ -542,19 +538,13 @@ currently_detained_by_criminality <-
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# Book-Ins by Facility Type and Criminality
-# Always at row 27 in column A
 book_ins_by_facility_type <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    start_row <- find_table_start(.x, sheet, "Book-Ins by")
-    if (length(start_row) == 0) {
-      return(NULL)
-    }
-    read_excel(
+    extract_table(
       .x,
-      sheet = sheet,
-      range = glue("A{start_row[1]+1}:E{start_row[1]+3}"),
+      sheet_pattern = "^Detention",
+      anchor_pattern = "Book-Ins by",
+      range = \(r) glue("A{r+1}:E{r+3}"),
       col_types = c("text", rep("numeric", 4))
     )
   }) |>
@@ -562,44 +552,36 @@ book_ins_by_facility_type <-
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# Book Outs by Facility Type
-# Header at H(anchor), data at H(anchor+1):J(anchor+3)
+# H(anchor+1):J(anchor+3)
 book_outs_by_facility_type <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    anchor <- find_table_start(.x, sheet, "Book-Ins by")
-    if (length(anchor) == 0) {
-      return(NULL)
-    }
-    df <- read_excel(
+    extract_table(
       .x,
-      sheet = sheet,
-      range = glue("H{anchor[1]+1}:J{anchor[1]+3}")
-    ) |>
-      select(where(~ !all(is.na(.x))))
-    if (ncol(df) == 0 || nrow(df) == 0) {
-      return(NULL)
-    }
-    names(df) <- c("facility_type", "total")[seq_len(ncol(df))]
-    df$facility_type <- as.character(df$facility_type)
-    df
+      sheet_pattern = "^Detention",
+      anchor_pattern = "Book-Ins by",
+      range = \(r) glue("H{r+1}:J{r+3}"),
+      post = \(df) {
+        df <- df |> select(where(~ !all(is.na(.x))))
+        if (ncol(df) == 0 || nrow(df) == 0) {
+          return(NULL)
+        }
+        names(df) <- c("facility_type", "total")[seq_len(ncol(df))]
+        df$facility_type <- as.character(df$facility_type)
+        df
+      }
+    )
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# Removals with FAMU/FRC identifier
-# At anchor+3 (row 30) in column P
+# FAMU/FRC removals at P(anchor+3)
 famu_removals <-
   safe_map(fls, \(.x) {
-    sheet <- get_sheet(.x, "^Detention")
-    anchor <- find_table_start(.x, sheet, "Book-Ins by")
-    if (length(anchor) == 0) {
-      return(NULL)
-    }
-    read_excel(
+    extract_table(
       .x,
-      sheet = sheet,
-      range = glue("P{anchor[1]+3}:P{anchor[1]+3}"),
+      sheet_pattern = "^Detention",
+      anchor_pattern = "Book-Ins by",
+      range = \(r) glue("P{r+3}:P{r+3}"),
       col_names = "famu_removals",
       col_types = "numeric"
     )
@@ -607,9 +589,6 @@ famu_removals <-
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# ── New datasets: ATD sheet ──────────────────────────────────────────────────
-
-# ATD summary tables: population by technology and by status
 atd_population <-
   safe_map(fls, \(.x) {
     sheet <- get_sheet(.x, "^ATD")
@@ -618,58 +597,35 @@ atd_population <-
     }
     col_a <- read_col_a(.x, sheet)
 
-    # Table 1: Population by technology
-    tech_row <- which(str_detect(
-      col_a[[1]],
-      "ATD Active Population Counts|ATD Active Participants"
-    ))
-    # Table 2: Population by status (FAMU/Single Adult)
-    status_row <- which(str_detect(
-      col_a[[1]],
-      "ATD Active Population by Status"
-    ))
-
-    results <- list()
-
-    if (length(tech_row) > 0) {
-      r <- tech_row[1]
-      tech_df <- read_excel(
+    read_atd_block <- function(label_pattern, n_rows, table_name) {
+      r <- which(str_detect(col_a[[1]], label_pattern))
+      if (length(r) == 0) {
+        return(NULL)
+      }
+      r <- r[1]
+      read_excel(
         .x,
         sheet = sheet,
-        range = glue("A{r+1}:C{r+8}"),
+        range = glue("A{r+1}:C{r+n_rows}"),
         col_types = c("text", rep("numeric", 2))
-      )
-      names(tech_df) <- c("category", "count", "value")
-      tech_df <- tech_df |>
+      ) |>
+        setNames(c("category", "count", "value")) |>
         filter(!is.na(category)) |>
-        mutate(table = "technology")
-      results <- c(results, list(tech_df))
+        mutate(table = table_name)
     }
 
-    if (length(status_row) > 0) {
-      r <- status_row[1]
-      status_df <- read_excel(
-        .x,
-        sheet = sheet,
-        range = glue("A{r+1}:C{r+6}"),
-        col_types = c("text", rep("numeric", 2))
-      )
-      names(status_df) <- c("category", "count", "value")
-      status_df <- status_df |>
-        filter(!is.na(category)) |>
-        mutate(table = "status")
-      results <- c(results, list(status_df))
-    }
-
-    if (length(results) == 0) {
-      return(NULL)
-    }
-    bind_rows(results)
+    bind_rows(
+      read_atd_block(
+        "ATD Active Population Counts|ATD Active Participants",
+        8,
+        "technology"
+      ),
+      read_atd_block("ATD Active Population by Status", 6, "status")
+    )
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# ATD by AOR and Technology (the detailed breakdown table)
 atd_by_aor <-
   safe_map(fls, \(.x) {
     sheet <- get_sheet(.x, "^ATD")
@@ -677,33 +633,26 @@ atd_by_aor <-
       return(NULL)
     }
     col_a <- read_col_a(.x, sheet)
-
-    aor_row <- which(str_detect(
-      col_a[[1]],
-      "Active ATD Participants.*by AOR"
-    ))
+    aor_row <- which(str_detect(col_a[[1]], "Active ATD Participants.*by AOR"))
     if (length(aor_row) == 0) {
       return(NULL)
     }
-
     r <- aor_row[1]
     end_row <- nrow(col_a)
-    df <- read_excel(
+    read_excel(
       .x,
       sheet = sheet,
       range = glue("A{r+1}:C{end_row}"),
       col_types = c("text", rep("numeric", 2))
-    )
-    names(df) <- c("aor_technology", "count", "avg_length_in_program")
-    df |> filter(!is.na(aor_technology))
+    ) |>
+      setNames(c("aor_technology", "count", "avg_length_in_program")) |>
+      filter(!is.na(aor_technology))
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
   distinct()
 
-# ATD court appearance data
-# Layout: header at [r, cc], then [r+1, cc]=Metric, [r+1, cc+1]=Count, [r+1, cc+2]=%
-# Data rows: [r+2..r+4, cc]=metric name, [r+2..r+4, cc+1]=count, [r+2..r+4, cc+2]=pct
+# Court Appearance header at [r,cc]; below: Metric|Count|% header at r+1, data at r+2..r+4
 atd_court_appearances <-
   safe_map(fls, \(.x) {
     sheet <- get_sheet(.x, "^ATD")
@@ -711,180 +660,121 @@ atd_court_appearances <-
       return(NULL)
     }
     df <- read_excel(.x, sheet = sheet, col_names = FALSE)
+    m <- as.matrix(df)
+    storage.mode(m) <- "character"
 
-    # Find all rows/cols containing "Court Appearance"
-    court_headers <- list()
-    for (i in seq_len(nrow(df))) {
-      for (j in seq_len(ncol(df))) {
-        v <- as.character(df[i, j])
-        if (!is.na(v) && str_detect(v, "Court Appearance")) {
-          court_headers <- c(court_headers, list(list(row = i, col = j)))
-        }
-      }
-    }
-    if (length(court_headers) == 0) {
+    mask <- !is.na(m) & str_detect(m, "Court Appearance")
+    dim(mask) <- dim(m)
+    hits <- which(mask, arr.ind = TRUE)
+    if (nrow(hits) == 0) {
       return(NULL)
     }
 
-    results <- list()
-    for (ch in court_headers) {
-      hr <- ch$row
-      cc <- ch$col
-      label <- as.character(df[hr, cc])
+    map_dfr(seq_len(nrow(hits)), \(i) {
+      hr <- hits[i, "row"]
+      cc <- hits[i, "col"]
+      if (hr + 2 > nrow(m) || cc + 2 > ncol(m)) {
+        return(NULL)
+      }
       hearing_type <- case_when(
-        str_detect(label, "Total") ~ "total",
-        str_detect(label, "Final") ~ "final",
+        str_detect(m[hr, cc], "Total") ~ "total",
+        str_detect(m[hr, cc], "Final") ~ "final",
         TRUE ~ "unknown"
       )
-      # Data rows are 2-4 rows below header (row hr+1 is the Metric/Count/% header)
-      for (mr in (hr + 2):(min(hr + 4, nrow(df)))) {
-        metric <- as.character(df[mr, cc])
-        count_val <- suppressWarnings(as.numeric(as.character(df[
-          mr,
-          cc + 1
-        ])))
-        pct_val <- suppressWarnings(as.numeric(as.character(df[
-          mr,
-          cc + 2
-        ])))
-        if (
-          !is.na(metric) &&
-            metric %in% c("Attended", "Failed to Attend", "Total")
-        ) {
-          results <- c(
-            results,
-            list(tibble(
-              hearing_type = hearing_type,
-              metric = metric,
-              count = count_val,
-              pct = pct_val
-            ))
-          )
-        }
-      }
-    }
-    if (length(results) == 0) {
-      return(NULL)
-    }
-    bind_rows(results)
+      rows <- (hr + 2):min(hr + 4, nrow(m))
+      tibble(
+        hearing_type = hearing_type,
+        metric = m[rows, cc],
+        count = suppressWarnings(as.numeric(m[rows, cc + 1])),
+        pct = suppressWarnings(as.numeric(m[rows, cc + 2]))
+      ) |>
+        filter(
+          !is.na(metric),
+          metric %in% c("Attended", "Failed to Attend", "Total")
+        )
+    })
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# ── New datasets: ICLOS and Detainees sheet ──────────────────────────────────
-
-# Since the ICLOS sheet has extremely wide format (72+ columns) with varying
-# year ranges across files, we extract the full table per-file into a list-column format
+# ICLOS sheet has very wide format (72+ cols, varying year ranges); keep
+# per-section summaries rather than the full wide table.
 iclos_and_detainees <-
   safe_map(fls, \(.x) {
     sheet <- get_sheet(.x, "ICLOS|Detainee")
     if (is.na(sheet)) {
       return(NULL)
     }
-
-    # Read full sheet
     df <- read_excel(.x, sheet = sheet, col_names = FALSE)
     if (nrow(df) < 7) {
       return(NULL)
     }
-
     col_a <- df[[1]]
 
-    # Find ICLOS section (rows with population labels in col A after "Population" header)
     iclos_header <- which(str_detect(col_a, "^Population") & !is.na(col_a))
     if (length(iclos_header) == 0) {
       return(NULL)
     }
-
-    # Find Detainees section
     det_header <- which(str_detect(col_a, "^Detainees$") & !is.na(col_a))
 
-    all_rows <- list()
-
-    # Process the two main sections
-    sections <- list()
-    if (length(iclos_header) > 0) {
-      sections[["iclos"]] <- iclos_header[1]
-    }
+    sections <- list(iclos = iclos_header[1])
     if (length(det_header) > 0) {
-      # Detainees has its own "Population" header a few rows after "Detainees"
       det_pop <- iclos_header[iclos_header > det_header[1]]
-      if (length(det_pop) > 0) {
-        sections[["detainees"]] <- det_pop[1]
-      }
+      if (length(det_pop) > 0) sections[["detainees"]] <- det_pop[1]
     }
 
-    for (section_name in names(sections)) {
+    map_dfr(names(sections), \(section_name) {
       pop_row <- sections[[section_name]]
-      # Year labels are in the row at pop_row
-      # Month labels are in pop_row + 1
-      # mid/end labels are in pop_row + 2
-      # Data starts at pop_row + 3
-
-      # Find where data ends (next section or end of data)
       data_start <- pop_row + 3
+      if (data_start > length(col_a)) {
+        return(NULL)
+      }
       remaining <- col_a[data_start:length(col_a)]
-      # Data rows have population labels; find where they end
       non_na_rows <- which(!is.na(remaining))
       if (length(non_na_rows) == 0) {
-        next
+        return(NULL)
       }
 
-      # Find contiguous blocks - stop at a gap > 2 rows or at "Detainees" marker
+      # Stop block at gap > 2 rows or at next section header
+      end_idx <- length(non_na_rows)
       for (i in seq_along(non_na_rows)) {
-        if (i > 1 && (non_na_rows[i] - non_na_rows[i - 1]) > 2) {
-          non_na_rows <- non_na_rows[1:(i - 1)]
-          break
-        }
-        # Also stop if we hit a section header
+        gap <- if (i > 1) non_na_rows[i] - non_na_rows[i - 1] else 0L
         label <- remaining[non_na_rows[i]]
-        if (!is.na(label) && str_detect(label, "^(Detainees|Population)$")) {
-          non_na_rows <- non_na_rows[1:(i - 1)]
+        if (
+          gap > 2L ||
+            (!is.na(label) && str_detect(label, "^(Detainees|Population)$"))
+        ) {
+          end_idx <- i - 1L
           break
         }
       }
-
-      if (length(non_na_rows) == 0) {
-        next
+      if (end_idx < 1L) {
+        return(NULL)
       }
-      data_end <- data_start + max(non_na_rows) - 1
+      data_end <- data_start + max(non_na_rows[seq_len(end_idx)]) - 1L
 
-      for (r in seq(data_start, data_end)) {
+      map_dfr(seq(data_start, data_end), \(r) {
         pop_label <- col_a[r]
         if (is.na(pop_label)) {
-          next
+          return(NULL)
         }
-        vals <- suppressWarnings(as.numeric(as.character(df[
-          r,
-          2:ncol(df)
-        ])))
+        vals <- suppressWarnings(as.numeric(unlist(df[r, 2:ncol(df)])))
         vals <- vals[!is.na(vals) & vals != 0]
         if (length(vals) == 0) {
-          next
+          return(NULL)
         }
-
-        all_rows <- c(
-          all_rows,
-          list(tibble(
-            section = section_name,
-            population = pop_label,
-            n_observations = length(vals),
-            latest_value = dplyr::last(vals)
-          ))
+        tibble(
+          section = section_name,
+          population = pop_label,
+          n_observations = length(vals),
+          latest_value = dplyr::last(vals)
         )
-      }
-    }
-
-    if (length(all_rows) == 0) {
-      return(NULL)
-    }
-    bind_rows(all_rows)
+      })
+    })
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
   distinct()
-
-# ── New datasets: Monthly Bond Statistics ────────────────────────────────────
 
 monthly_bond_stats <-
   safe_map(fls, \(.x) {
@@ -892,8 +782,7 @@ monthly_bond_stats <-
     if (is.na(sheet)) {
       return(NULL)
     }
-
-    # Skip title/empty/date rows — data rows are all text + numeric
+    # Title/empty/date rows live in 1-3; data rows are text + numeric below
     df <- read_excel(.x, sheet = sheet, col_names = FALSE, skip = 3)
     if (nrow(df) < 5) {
       return(NULL)
@@ -901,71 +790,48 @@ monthly_bond_stats <-
     n_cols <- ncol(df)
 
     col_a <- df[[1]]
-    total_row <- which(str_detect(
-      col_a,
-      "Total ICE Final (Book Outs|Releases)"
-    ))
-    bond_row <- which(str_detect(
-      col_a,
-      "ICE Final (Book Outs|Releases) with Bond"
-    ))
-    pct_row <- which(str_detect(col_a, "Bond Posted.*%"))
-    avg_row <- which(str_detect(col_a, "Average Bond Amount"))
-    alos_row <- which(str_detect(col_a, "ALOS"))
+    metric_specs <- tribble(
+      ~name             , ~pattern                                   ,
+      "total_book_outs" , "Total ICE Final (Book Outs|Releases)"     ,
+      "bond_book_outs"  , "ICE Final (Book Outs|Releases) with Bond" ,
+      "bond_pct"        , "Bond Posted.*%"                           ,
+      "avg_bond_amount" , "Average Bond Amount"                      ,
+      "alos_days"       , "ALOS"
+    ) |>
+      mutate(
+        row = map_int(pattern, \(p) {
+          r <- which(str_detect(col_a, p))
+          if (length(r) == 0) NA_integer_ else r[1]
+        })
+      ) |>
+      filter(!is.na(row))
 
-    if (length(total_row) == 0) {
+    if (!"total_book_outs" %in% metric_specs$name) {
       return(NULL)
     }
 
-    # Read date row (row 3) as dates
-    dates_df <- read_excel(
+    # Date row is row 3 of the original sheet. readxl returns POSIXct columns;
+    # `do.call(c, ...)` preserves that class across concatenation, then as.Date
+    # converts cleanly. (Bare unlist would drop the class to seconds-since-epoch.)
+    dates <- read_excel(
       .x,
       sheet = sheet,
       col_names = FALSE,
-      range = glue("B3:{LETTERS[n_cols]}3"),
+      range = cell_limits(c(3, 2), c(3, n_cols)),
       col_types = "date"
     )
-    date_vals <- as.Date(do.call(c, dates_df))
+    date_vals <- as.Date(do.call(c, dates))
 
-    results <- list()
-    metrics <- list(
-      list(row = total_row, name = "total_book_outs"),
-      list(row = bond_row, name = "bond_book_outs"),
-      list(row = pct_row, name = "bond_pct"),
-      list(row = avg_row, name = "avg_bond_amount"),
-      list(row = alos_row, name = "alos_days")
-    )
-
-    for (m in metrics) {
-      if (length(m$row) == 0) {
-        next
-      }
-      vals <- unlist(df[m$row[1], 2:n_cols], use.names = FALSE)
-      for (j in seq_along(vals)) {
-        if (!is.na(vals[j]) && vals[j] != 0 && !is.na(date_vals[j])) {
-          results <- c(
-            results,
-            list(tibble(
-              date = date_vals[j],
-              metric = m$name,
-              value = vals[j]
-            ))
-          )
-        }
-      }
-    }
-
-    if (length(results) == 0) {
-      return(NULL)
-    }
-    bind_rows(results)
+    pmap_dfr(metric_specs, \(name, pattern, row) {
+      vals <- unlist(df[row, -1], use.names = FALSE)
+      tibble(date = date_vals, metric = name, value = vals) |>
+        filter(!is.na(value), value != 0, !is.na(date))
+    })
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
   mutate(month = month.abb[month(date)]) |>
   relocate(month, date, metric, value, fiscal_year, file_date, pull_date)
-
-# ── New datasets: Monthly Segregation ────────────────────────────────────────
 
 monthly_segregation <-
   safe_map(fls, \(.x) {
@@ -973,177 +839,153 @@ monthly_segregation <-
     if (is.na(sheet)) {
       return(NULL)
     }
-
     df <- read_excel(.x, sheet = sheet, col_names = FALSE)
     col_a <- as.character(df[[1]])
     col_b <- suppressWarnings(as.numeric(as.character(df[[2]])))
 
-    results <- list()
-    current_month <- NA_character_
+    # Month headers like "November 2025\nThis Segregation..."
+    month_pattern <- "^(January|February|March|April|May|June|July|August|September|October|November|December)\\s+\\d{4}"
+    skip_pattern <- "^(Facilities|Placement Count|Grand Total|U\\.S\\.)|Segregation Review"
 
-    for (i in seq_len(nrow(df))) {
-      a <- col_a[i]
-      b <- col_b[i]
-      if (is.na(a)) {
-        next
-      }
+    is_month <- !is.na(col_a) & str_detect(col_a, month_pattern)
+    is_skip <- !is.na(col_a) & str_detect(col_a, skip_pattern)
 
-      # Detect month headers (e.g., "November 2025\nThis Segregation...")
-      month_match <- str_extract(
-        a,
-        "^(January|February|March|April|May|June|July|August|September|October|November|December)\\s+\\d{4}"
-      )
-      if (!is.na(month_match)) {
-        current_month <- month_match
-        next
-      }
-
-      # Skip header rows and Grand Total
-      if (str_detect(a, "^(Facilities|Placement Count|Grand Total|U\\.S\\.)")) {
-        next
-      }
-      if (str_detect(a, "Segregation Review")) {
-        next
-      }
-
-      # Data rows: facility name in A, count in B
-      if (!is.na(current_month) && !is.na(b)) {
-        results <- c(
-          results,
-          list(tibble(
-            month = current_month,
-            facility = a,
-            placement_count = b
-          ))
-        )
-      }
-    }
-
-    if (length(results) == 0) {
-      return(NULL)
-    }
-    bind_rows(results) |>
-      mutate(
-        date = myd(paste0(month, " 1")),
-        month = month.abb[month(date)]
+    tibble(
+      month_raw = if_else(
+        is_month,
+        str_extract(col_a, month_pattern),
+        NA_character_
+      ),
+      facility = col_a,
+      placement_count = col_b,
+      drop_row = is_month | is_skip
+    ) |>
+      fill(month_raw) |>
+      filter(
+        !drop_row,
+        !is.na(month_raw),
+        !is.na(facility),
+        !is.na(placement_count)
+      ) |>
+      transmute(
+        date = myd(paste0(month_raw, " 1")),
+        month = month.abb[month(date)],
+        facility = facility,
+        placement_count = placement_count
       )
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
-  relocate(month, date, facility, placement_count,
-           fiscal_year, file_date, pull_date)
+  relocate(
+    month,
+    date,
+    facility,
+    placement_count,
+    fiscal_year,
+    file_date,
+    pull_date
+  )
 
-# ── New datasets: Semiannual ─────────────────────────────────────────────────
-
-# Extract all semiannual tables: Armed Forces, US Citizens, Parents of USC,
-# and TPS countries (arrests, bookins, removals for each)
+# Armed Forces / US Citizens / Parents of USC / TPS country tables, all on the
+# same sheet, all keyed off a header row in column A.
 semiannual_data <-
   safe_map(fls, \(.x) {
     sheet <- get_sheet(.x, "Semiannual")
     if (is.na(sheet)) {
       return(NULL)
     }
-
     df <- read_excel(.x, sheet = sheet, col_names = FALSE)
     col_a <- as.character(df[[1]])
 
-    results <- list()
-
-    # Find simple FY-based tables (2-column: Fiscal Year | Value)
-    simple_tables <- list(
-      "armed_forces_arrests" = "Armed Forces.*Arrests",
-      "armed_forces_bookins" = "Armed Forces.*Bookins",
-      "armed_forces_removals" = "Armed Forces.*Removals",
-      "us_citizen_arrests" = "United States Citizen Arrests",
-      "us_citizen_bookins" = "United States Citizens? Bookins",
-      "us_citizen_removals" = "United States Citizens? Removals",
-      "parents_usc_arrests" = "Parents of USC? Arrests",
-      "parents_usc_bookins" = "Parents of USC? Bookins",
-      "parents_usc_removals" = "Parents of USC? Removals"
+    # 2-column tables: Fiscal Year | Value
+    simple_specs <- tribble(
+      ~name                   , ~pattern                           ,
+      "armed_forces_arrests"  , "Armed Forces.*Arrests"            ,
+      "armed_forces_bookins"  , "Armed Forces.*Bookins"            ,
+      "armed_forces_removals" , "Armed Forces.*Removals"           ,
+      "us_citizen_arrests"    , "United States Citizen Arrests"    ,
+      "us_citizen_bookins"    , "United States Citizens? Bookins"  ,
+      "us_citizen_removals"   , "United States Citizens? Removals" ,
+      "parents_usc_arrests"   , "Parents of USC? Arrests"          ,
+      "parents_usc_bookins"   , "Parents of USC? Bookins"          ,
+      "parents_usc_removals"  , "Parents of USC? Removals"
     )
-
-    for (tbl_name in names(simple_tables)) {
-      pattern <- simple_tables[[tbl_name]]
-      header_row <- which(str_detect(col_a, pattern))
-      if (length(header_row) == 0) {
-        next
+    simple_results <- pmap_dfr(simple_specs, \(name, pattern) {
+      hr <- which(str_detect(col_a, pattern))
+      if (length(hr) == 0) {
+        return(NULL)
       }
-      hr <- header_row[1]
-
-      # Read data rows (FY + value pairs) below the header
-      for (r in (hr + 2):min(hr + 12, nrow(df))) {
-        fy <- col_a[r]
-        val <- suppressWarnings(as.numeric(as.character(df[r, 2])))
-        if (is.na(fy) || !str_detect(fy, "^FY")) {
-          break
-        }
-        results <- c(
-          results,
-          list(tibble(
-            table_name = tbl_name,
-            data_fiscal_year = parse_fy(fy),
-            country = NA_character_,
-            value = val
-          ))
-        )
+      hr <- hr[1]
+      if (hr + 2 > nrow(df)) {
+        return(NULL)
       }
-    }
+      rows <- (hr + 2):min(hr + 12, nrow(df))
+      fy_labels <- col_a[rows]
+      keep <- cumall(
+        !is.na(fy_labels) & str_detect(replace_na(fy_labels, ""), "^FY")
+      )
+      rows <- rows[keep]
+      if (length(rows) == 0) {
+        return(NULL)
+      }
+      tibble(
+        table_name = name,
+        data_fiscal_year = parse_fy(col_a[rows]),
+        country = NA_character_,
+        value = suppressWarnings(as.numeric(unlist(df[rows, 2])))
+      )
+    })
 
-    # TPS country tables (multi-column: Country | FY values)
-    tps_tables <- list(
-      "tps_arrests" = "Temporary Protected Status Countries Arrests",
-      "tps_bookins" = "Temporary Protected Status Countries Bookins",
-      "tps_removals" = "Temporary Protected Status Countries Removals"
+    # Multi-column tables: Country | FY values
+    tps_specs <- tribble(
+      ~name          , ~pattern                                        ,
+      "tps_arrests"  , "Temporary Protected Status Countries Arrests"  ,
+      "tps_bookins"  , "Temporary Protected Status Countries Bookins"  ,
+      "tps_removals" , "Temporary Protected Status Countries Removals"
     )
-
-    for (tbl_name in names(tps_tables)) {
-      pattern <- tps_tables[[tbl_name]]
-      header_row <- which(str_detect(col_a, pattern))
-      if (length(header_row) == 0) {
-        next
+    tps_results <- pmap_dfr(tps_specs, \(name, pattern) {
+      hr <- which(str_detect(col_a, pattern))
+      if (length(hr) == 0) {
+        return(NULL)
       }
-      hr <- header_row[1]
-
-      # Header row has column names: Country | FY years
-      fy_header <- as.character(df[hr + 1, ])
-      fy_cols <- which(str_detect(fy_header, "^FY\\d{4}$"))
+      hr <- hr[1]
+      if (hr + 2 > nrow(df)) {
+        return(NULL)
+      }
+      fy_header <- as.character(unlist(df[hr + 1, ]))
+      fy_cols <- which(str_detect(replace_na(fy_header, ""), "^FY\\d{4}$"))
+      if (length(fy_cols) == 0) {
+        return(NULL)
+      }
       fy_names <- fy_header[fy_cols]
 
-      # Read data rows
-      for (r in (hr + 2):min(hr + 25, nrow(df))) {
-        country <- col_a[r]
-        if (is.na(country) || str_detect(country, "^$")) {
-          break
-        }
-        for (j in seq_along(fy_cols)) {
-          val <- suppressWarnings(as.numeric(as.character(df[
-            r,
-            fy_cols[j]
-          ])))
-          if (!is.na(val)) {
-            results <- c(
-              results,
-              list(tibble(
-                table_name = tbl_name,
-                data_fiscal_year = parse_fy(fy_names[j]),
-                country = country,
-                value = val
-              ))
-            )
-          }
-        }
+      rows <- (hr + 2):min(hr + 25, nrow(df))
+      countries <- col_a[rows]
+      keep <- cumall(!is.na(countries) & countries != "")
+      rows <- rows[keep]
+      if (length(rows) == 0) {
+        return(NULL)
       }
-    }
 
-    if (length(results) == 0) {
-      return(NULL)
-    }
-    bind_rows(results)
+      val_chr <- as.matrix(df[rows, fy_cols, drop = FALSE])
+      val_num <- suppressWarnings(matrix(
+        as.numeric(val_chr),
+        nrow = length(rows),
+        ncol = length(fy_cols)
+      ))
+      tibble(
+        table_name = name,
+        data_fiscal_year = rep(parse_fy(fy_names), each = length(rows)),
+        country = rep(col_a[rows], times = length(fy_cols)),
+        value = as.vector(val_num)
+      ) |>
+        filter(!is.na(value))
+    })
+
+    bind_rows(simple_results, tps_results)
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
-
-# ── New datasets: Vulnerable & Special Population ────────────────────────────
 
 vulnerable_population <-
   safe_map(fls, \(.x) {
@@ -1151,11 +993,9 @@ vulnerable_population <-
     if (is.na(sheet)) {
       return(NULL)
     }
-
     df <- read_excel(.x, sheet = sheet, col_names = FALSE)
     col_a <- as.character(df[[1]])
 
-    # Find quarterly data sections
     quarter_rows <- which(str_detect(
       col_a,
       "^Fiscal Year \\(FY\\)\\s+\\d{4} Quarter \\d"
@@ -1164,89 +1004,62 @@ vulnerable_population <-
       return(NULL)
     }
 
-    results <- list()
-
-    for (qr in quarter_rows) {
-      # Extract quarter label
-      quarter_label <- col_a[qr]
-      fy_quarter <- str_extract(quarter_label, "\\d{4} Quarter \\d")
-
-      # Data starts 2 rows below (header row + data rows)
-      # Header: Placement Reason | Number of Placements | Avg Consecutive | Avg Cumulative
-      for (r in (qr + 2):min(qr + 8, nrow(df))) {
-        reason <- col_a[r]
-        if (is.na(reason)) {
-          break
-        }
-        if (str_detect(reason, "^\\*|^$")) {
-          break
-        }
-
-        n_placements <- suppressWarnings(as.numeric(as.character(df[r, 2])))
-        avg_consec <- suppressWarnings(as.numeric(as.character(df[r, 3])))
-        avg_cumul <- suppressWarnings(as.numeric(as.character(df[r, 4])))
-
-        results <- c(
-          results,
-          list(tibble(
-            fy_quarter = fy_quarter,
-            placement_reason = reason,
-            n_placements = n_placements,
-            avg_consecutive_days = avg_consec,
-            avg_cumulative_days = avg_cumul
-          ))
-        )
+    # Header at qr+1: Placement Reason | Number of Placements | Avg Consecutive | Avg Cumulative
+    map_dfr(quarter_rows, \(qr) {
+      fy_quarter <- str_extract(col_a[qr], "\\d{4} Quarter \\d")
+      if (qr + 2 > nrow(df)) {
+        return(NULL)
       }
-
-      # Try to extract unique detainee count from footnote
-      for (fr in (qr + 8):min(qr + 15, nrow(df))) {
-        note <- col_a[fr]
-        if (!is.na(note) && str_detect(note, "unique detainees")) {
-          n_unique <- str_extract(note, "\\d+") |> as.integer()
-          if (!is.na(n_unique)) {
-            results <- c(
-              results,
-              list(tibble(
-                fy_quarter = fy_quarter,
-                placement_reason = "_unique_detainees",
-                n_placements = n_unique,
-                avg_consecutive_days = NA_real_,
-                avg_cumulative_days = NA_real_
-              ))
-            )
-          }
-          break
-        }
+      rows <- (qr + 2):min(qr + 8, nrow(df))
+      reasons <- col_a[rows]
+      keep <- cumall(
+        !is.na(reasons) & !str_detect(replace_na(reasons, ""), "^\\*|^$")
+      )
+      rows <- rows[keep]
+      if (length(rows) == 0) {
+        return(NULL)
       }
-    }
-
-    if (length(results) == 0) {
-      return(NULL)
-    }
-    bind_rows(results)
+      tibble(
+        fy_quarter = fy_quarter,
+        placement_reason = col_a[rows],
+        n_placements = suppressWarnings(as.numeric(unlist(df[rows, 2]))),
+        avg_consecutive_days = suppressWarnings(as.numeric(unlist(df[
+          rows,
+          3
+        ]))),
+        avg_cumulative_days = suppressWarnings(as.numeric(unlist(df[rows, 4])))
+      )
+    })
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
-  filter(placement_reason != "_unique_detainees") |>
   mutate(
     data_fiscal_year = as.integer(str_extract(fy_quarter, "\\d{4}")),
     data_quarter = as.integer(str_extract(fy_quarter, "(?<=Quarter )\\d"))
   ) |>
   select(-fy_quarter) |>
-  relocate(placement_reason, data_fiscal_year, data_quarter,
-           n_placements, avg_consecutive_days, avg_cumulative_days,
-           fiscal_year, file_date, pull_date)
-
-# ── Write outputs ─────────────────────────────────────────────────────────────
+  relocate(
+    placement_reason,
+    data_fiscal_year,
+    data_quarter,
+    n_placements,
+    avg_consecutive_days,
+    avg_cumulative_days,
+    fiscal_year,
+    file_date,
+    pull_date
+  )
 
 dir.create("data", showWarnings = FALSE, recursive = TRUE)
 
-# Original datasets
 nanoparquet::write_parquet(
   book_ins_by_arresting_agency,
   "data/book-ins-by-arresting-agency.parquet"
 )
-nanoparquet::write_parquet(book_outs_by_reason, "data/book-outs-by-reason.parquet")
+nanoparquet::write_parquet(
+  book_outs_by_reason,
+  "data/book-outs-by-reason.parquet"
+)
 nanoparquet::write_parquet(
   book_outs_by_reason_annual,
   "data/book-outs-by-reason-annual.parquet"
@@ -1265,13 +1078,14 @@ nanoparquet::write_parquet(
 )
 nanoparquet::write_parquet(removals, "data/removals.parquet")
 nanoparquet::write_parquet(detainees_by_facility, "data/facilities.parquet")
-
-# New Detention sheet datasets
 nanoparquet::write_parquet(
   currently_detained_by_disposition,
   "data/currently-detained-by-disposition.parquet"
 )
-nanoparquet::write_parquet(fear_decision_time, "data/fear-decision-time.parquet")
+nanoparquet::write_parquet(
+  fear_decision_time,
+  "data/fear-decision-time.parquet"
+)
 nanoparquet::write_parquet(
   fear_decisions_by_facility_type,
   "data/fear-decisions-by-facility-type.parquet"
@@ -1289,34 +1103,28 @@ nanoparquet::write_parquet(
   "data/book-outs-by-facility-type.parquet"
 )
 nanoparquet::write_parquet(famu_removals, "data/famu-removals.parquet")
-
-# ATD datasets
 nanoparquet::write_parquet(atd_population, "data/atd-population.parquet")
 nanoparquet::write_parquet(atd_by_aor, "data/atd-by-aor.parquet")
 nanoparquet::write_parquet(
   atd_court_appearances,
   "data/atd-court-appearances.parquet"
 )
-
-# ICLOS and Detainees
-nanoparquet::write_parquet(iclos_and_detainees, "data/iclos-and-detainees.parquet")
-
-# Monthly Bond Statistics
+nanoparquet::write_parquet(
+  iclos_and_detainees,
+  "data/iclos-and-detainees.parquet"
+)
 nanoparquet::write_parquet(monthly_bond_stats, "data/bond-stats.parquet")
-
-# Monthly Segregation
 nanoparquet::write_parquet(monthly_segregation, "data/segregation.parquet")
-
-# Semiannual
-nanoparquet::write_parquet(semiannual_data, "data/special-population-actions.parquet")
-
-# Vulnerable & Special Population
+nanoparquet::write_parquet(
+  semiannual_data,
+  "data/special-population-actions.parquet"
+)
 nanoparquet::write_parquet(
   vulnerable_population,
   "data/vulnerable-population.parquet"
 )
 
-# ── Also write xlsx and dta versions of every parquet file ───────────────────
+# Mirror every parquet as xlsx and dta for downstream Stata/Excel consumers
 for (pq in list.files("data", pattern = "\\.parquet$", full.names = TRUE)) {
   df <- nanoparquet::read_parquet(pq)
   base <- tools::file_path_sans_ext(pq)
