@@ -232,18 +232,32 @@ book_ins_by_arresting_agency <-
 
 book_outs_by_reason <-
   safe_map(fls, \(.x) {
-    extract_table(
-      .x,
-      sheet_pattern = "^Detention",
-      anchor_pattern = "ICE Final (Book Outs|Releases) by Release Reason, Month and Criminality",
-      range = \(r) glue("A{r+1}:O{r+26}"),
+    # The number of release reasons grew over time (FY21-23: 6, FY24-25: 12,
+    # FY26: 13). Find the next section header to bound the read dynamically
+    # rather than hardcoding a row count.
+    sheet <- get_sheet(.x, "^Detention")
+    if (is.na(sheet)) return(NULL)
+    col_a <- read_col_a(.x, sheet)[[1]]
+    a <- which(str_detect(
+      col_a,
+      "ICE Final (Book Outs|Releases) by Release Reason, Month and Criminality"
+    ))
+    if (length(a) == 0) return(NULL)
+    r <- a[1]
+    after_r <- which(str_detect(
+      col_a,
+      "^ICE [A-Z]|^Aliens|^Currently|^Noncitizens|^Individuals"
+    ) & seq_along(col_a) > r)
+    end_row <- if (length(after_r) > 0) after_r[1] - 1 else length(col_a)
+    if (end_row < r + 5) return(NULL)
+    read_excel(
+      .x, sheet = sheet,
+      range = glue("A{r+1}:O{end_row}"),
       col_types = c("text", "text", rep("numeric", 13)),
-      post = \(df) {
-        df |>
-          filter(!is.na(`Release Reason`) | !is.na(Criminality)) |>
-          fill(`Release Reason`)
-      }
-    )
+      col_names = TRUE, na = ""
+    ) |>
+      filter(!is.na(`Release Reason`) | !is.na(Criminality)) |>
+      fill(`Release Reason`)
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
@@ -251,6 +265,16 @@ book_outs_by_reason <-
   add_fy_date_cols() |>
   rename(n_book_outs_ytd = Total) |>
   janitor::clean_names() |>
+  # Clean up source-data inconsistencies in release_reason:
+  #   - Some FY24 files (Feb-Apr 2024) have a typo with " Total" appended
+  #     (e.g., "Relief Granted by IJ Total"). Strip the trailing " Total".
+  #   - FY26 files use inconsistent capitalization ("Bonded out" vs "Bonded
+  #     Out", "Order of supervision" vs "Order of Supervision"). Canonicalize.
+  mutate(release_reason = release_reason |>
+    str_replace(" Total$", "") |>
+    str_replace_all("Bonded out", "Bonded Out") |>
+    str_replace_all("Order of supervision", "Order of Supervision")
+  ) |>
   relocate(
     release_reason,
     criminality,
@@ -420,19 +444,39 @@ detainees_by_facility <-
     if (!is.na(test_row[[1]]) && str_detect(test_row[[1]], "^Name")) {
       sr <- sr + 1
     }
-    df <- read_excel(.x, sheet = sheet, range = glue("A{sr}:N{end_row}")) |>
-      filter(!is.na(Name))
-    # coerce ALOS columns to character so years bind together cleanly
+    # The Facilities sheet has 27-31 columns spanning Address, AOR, FY ALOS,
+    # Level A-D, gender x criminality breakdowns, ICE threat levels, mandatory
+    # beds, and inspection metadata. AE covers the widest year (FY19, 31 cols).
+    df <- read_excel(
+      .x, sheet = sheet, range = glue("A{sr}:AE{end_row}"),
+      .name_repair = "minimal"
+    )
+    # Drop empty trailing columns (years with fewer than 31 cols come back with
+    # blank names) before any tidy op, which can't handle "" column names.
+    df <- df[, !is.na(colnames(df)) & colnames(df) != ""]
+    df <- filter(df, !is.na(Name))
+    # Coerce all columns except identity/text columns to character so
+    # bind_rows can align across years that differ in column types (e.g., ICE
+    # Threat Level was numeric in FY19-23 and text "5%" in FY25+).
+    keep_typed <- c("Name", "Address", "City", "State", "AOR", "Type Detailed",
+                    "Male/Female")
+    coerce_cols <- setdiff(colnames(df), keep_typed)
+    df[coerce_cols] <- lapply(df[coerce_cols], as.character)
     alos_cols <- grep("^FY\\d{2} ALOS$", colnames(df), value = TRUE)
-    df[alos_cols] <- lapply(df[alos_cols], as.character)
     df <- df |>
       pivot_longer(all_of(alos_cols), values_to = "alos") |>
       filter(!is.na(alos)) |>
       select(-name)
-    df$Zip <- as.character(df$Zip)
     df
   }) |>
   janitor::clean_names() |>
+  # Shorten clean_names output that exceeds Stata's 32-char variable name limit.
+  rename_with(\(n) recode(n,
+    second_to_last_inspection_standard      = "s2l_inspection_standard",
+    last_nakamoto_inspection_standard       = "last_nak_inspection_standard",
+    last_nakamoto_inspection_rating_final   = "last_nak_inspection_rating",
+    second_to_last_nakamoto_inspection_type = "s2l_nak_inspection_type"
+  )) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
   mutate(
@@ -477,13 +521,17 @@ currently_detained_by_disposition <-
       post = \(df) {
         names(df)[1] <- "disposition"
         df <- df |> select(-starts_with("..."))
-        num_cols <- setdiff(names(df), "disposition")
-        if (length(num_cols) >= 2) {
-          names(df)[2:min(4, ncol(df))] <- c(
-            "fsc_frc",
-            "adult",
-            "total"
-          )[seq_along(num_cols)]
+        # Map header text to canonical names: FRC/FSC -> fsc_frc, Adult ->
+        # adult, Total -> total. FY24/FY25 dropped FSC, so the surviving
+        # numeric columns are just Adult and Total — content-based renaming
+        # ensures values land in the right columns regardless of position.
+        canonical <- c(
+          "FRC" = "fsc_frc", "FSC" = "fsc_frc",
+          "Adult" = "adult", "Total" = "total"
+        )
+        for (i in seq_along(names(df))[-1]) {
+          h <- names(df)[i]
+          if (h %in% names(canonical)) names(df)[i] <- canonical[[h]]
         }
         df
       }
@@ -526,27 +574,50 @@ fear_decision_time <-
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# N(anchor+1):P(anchor+4)
+# Fear-decisions-by-facility-type table sits to the right of the disposition
+# table. Its label column shifts between M and N depending on whether FSC is
+# present in the disposition table — so locate the label column by content
+# (cells containing Total/FSC/Adult/FRC) rather than hardcoding it.
 fear_decisions_by_facility_type <-
   safe_map(fls, \(.x) {
     extract_table(
       .x,
       sheet_pattern = "^Detention",
       anchor_pattern = "Currently Detained by Processing Disposition",
-      range = \(r) glue("N{r+1}:P{r+4}"),
+      range = \(r) glue("M{r+1}:Q{r+4}"),
+      col_names = FALSE,
       post = \(df) {
-        df <- df |> select(where(~ !all(is.na(.x))))
-        if (ncol(df) < 2 || nrow(df) == 0) {
-          return(NULL)
+        if (ncol(df) < 2 || nrow(df) == 0) return(NULL)
+        # Find the column whose values include facility-type labels.
+        label_col <- NA_integer_
+        for (i in seq_len(ncol(df))) {
+          vals <- as.character(df[[i]])
+          if (any(vals %in% c("Total", "FSC", "FRC", "Adult"), na.rm = TRUE)) {
+            label_col <- i
+            break
+          }
         }
-        names(df) <- c("facility_type", "total_detained")
-        df$facility_type <- as.character(df$facility_type)
-        # Skip if facility_type only contains numbers (range was misaligned)
-        valid <- df$facility_type[!is.na(df$facility_type)]
-        if (length(valid) == 0 || all(grepl("^[0-9]", valid))) {
-          return(NULL)
+        if (is.na(label_col) || label_col >= ncol(df)) return(NULL)
+        # Find the first numeric column to the right of the label column.
+        count_col <- NA_integer_
+        for (i in (label_col + 1):ncol(df)) {
+          vals <- suppressWarnings(as.numeric(df[[i]]))
+          if (any(!is.na(vals))) {
+            count_col <- i
+            break
+          }
         }
-        filter(df, !is.na(facility_type))
+        if (is.na(count_col)) return(NULL)
+        tibble::tibble(
+          facility_type = as.character(df[[label_col]]),
+          total_detained = suppressWarnings(as.numeric(df[[count_col]]))
+        ) |>
+          # Drop the header row ("Detention Facility Type" / "Type") that
+          # ends up in the same column as the labels, and any empty rows.
+          filter(
+            !is.na(facility_type),
+            !facility_type %in% c("Detention Facility Type", "Type")
+          )
       }
     )
   }) |>
@@ -567,28 +638,32 @@ currently_detained_by_criminality <-
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
+# Range r+4 covers all 3 facility types (Total + FSC + Adult) when present;
+# r+3 only had room for 2 rows, silently dropping Adult in years with FSC.
+# Empty trailing rows are filtered out via filter(!is.na(facility_type)).
 book_ins_by_facility_type <-
   safe_map(fls, \(.x) {
     extract_table(
       .x,
       sheet_pattern = "^Detention",
       anchor_pattern = "Book-Ins by",
-      range = \(r) glue("A{r+1}:E{r+3}"),
+      range = \(r) glue("A{r+1}:E{r+4}"),
       col_types = c("text", rep("numeric", 4))
     )
   }) |>
   janitor::clean_names() |>
+  filter(!is.na(facility_type)) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file)
 
-# H(anchor+1):J(anchor+3)
+# H(anchor+1):J(anchor+4) — see comment on book_ins_by_facility_type for why r+4.
 book_outs_by_facility_type <-
   safe_map(fls, \(.x) {
     extract_table(
       .x,
       sheet_pattern = "^Detention",
       anchor_pattern = "Book-Ins by",
-      range = \(r) glue("H{r+1}:J{r+3}"),
+      range = \(r) glue("H{r+1}:J{r+4}"),
       post = \(df) {
         df <- df |> select(where(~ !all(is.na(.x))))
         if (ncol(df) == 0 || nrow(df) == 0) {
@@ -596,7 +671,7 @@ book_outs_by_facility_type <-
         }
         names(df) <- c("facility_type", "total")[seq_len(ncol(df))]
         df$facility_type <- as.character(df$facility_type)
-        df
+        filter(df, !is.na(facility_type))
       }
     )
   }) |>
