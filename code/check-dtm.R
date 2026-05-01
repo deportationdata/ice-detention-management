@@ -7,27 +7,23 @@ library(pointblank)
 # ── Expected parquet files ────────────────────────────────────────────────────
 
 EXPECTED_FILES <- c(
-  "adp-by-agency-criminality",
+  "adp-and-stay-length-by-agency",
   "atd-by-aor",
   "atd-court-appearances",
   "atd-population",
-  "stay-length-by-agency-criminality",
   "book-ins-by-arresting-agency",
-  "book-ins-by-facility-type",
-  "book-outs-by-facility-type",
-  "book-outs-by-reason",
-  "book-outs-by-reason-all-years",
   "book-outs-by-reason-annual",
+  "book-outs-by-reason-monthly",
   "currently-detained-by-criminality",
   "currently-detained-by-disposition",
   "facilities",
-  "famu-removals",
   "fear-decision-time",
   "fear-decisions-by-facility-type",
+  "flows-by-facility-type",
   "iclos-and-detainees",
   "bond-stats",
   "segregation",
-  "removals",
+  "pull-totals",
   "special-population-actions",
   "vulnerable-population"
 )
@@ -45,7 +41,7 @@ expected_cols <- list(
     "file_date",
     "pull_date"
   ),
-  `book-outs-by-reason` = c(
+  `book-outs-by-reason-monthly` = c(
     "release_reason",
     "criminality",
     "month",
@@ -56,12 +52,15 @@ expected_cols <- list(
     "file_date",
     "pull_date"
   ),
-  `adp-by-agency-criminality` = c(
+  `adp-and-stay-length-by-agency` = c(
     "agency",
+    "criminality",
     "month",
     "date",
     "adp",
     "adp_fy_ytd",
+    "avg_stay_length_days",
+    "avg_stay_length_days_fy_ytd",
     "fiscal_year",
     "file_date",
     "pull_date"
@@ -85,7 +84,24 @@ expected_cols <- list(
     "file_date",
     "pull_date"
   ),
-  removals = c("removals", "fiscal_year", "file_date", "pull_date"),
+  `pull-totals` = c(
+    "n_removals_fy_ytd",
+    "famu_removals",
+    "fiscal_year",
+    "file_date",
+    "pull_date"
+  ),
+  `flows-by-facility-type` = c(
+    "facility_type",
+    "n_book_ins_convicted_criminal",
+    "n_book_ins_pending_charges",
+    "n_book_ins_other_imm_violator",
+    "n_book_ins_total",
+    "n_book_outs_total",
+    "fiscal_year",
+    "file_date",
+    "pull_date"
+  ),
   `currently-detained-by-criminality` = c(
     "criminality",
     "ice",
@@ -183,9 +199,9 @@ current_fy <- if (as.integer(format(Sys.Date(), "%m")) >= 10) {
 
 fy_datasets <- c(
   "book-ins-by-arresting-agency",
-  "book-outs-by-reason",
-  "adp-by-agency-criminality",
-  "removals",
+  "book-outs-by-reason-monthly",
+  "adp-and-stay-length-by-agency",
+  "pull-totals",
   "facilities",
   "currently-detained-by-criminality"
 )
@@ -219,8 +235,8 @@ agents$fiscal_year <- fy_df |>
 # ── 4. Date ordering: file_date >= pull_date ─────────────────────────────────
 
 bi <- read_parquet("data/book-ins-by-arresting-agency.parquet")
-bo <- read_parquet("data/book-outs-by-reason.parquet")
-adp <- read_parquet("data/adp-by-agency-criminality.parquet")
+bo <- read_parquet("data/book-outs-by-reason-monthly.parquet")
+adp <- read_parquet("data/adp-and-stay-length-by-agency.parquet")
 
 date_df <- bind_rows(
   bi |> select(file_date, pull_date) |> mutate(dataset = "book-ins"),
@@ -288,17 +304,23 @@ agents$nonneg_bookouts <- bo |>
   ) |>
   interrogate()
 
-rem <- read_parquet("data/removals.parquet")
+rem <- read_parquet("data/pull-totals.parquet")
 agents$nonneg_removals <- rem |>
   create_agent(
-    label = "removals — non-negative values",
+    label = "pull-totals — non-negative values",
     actions = action_levels(warn_at = 1, stop_at = 1)
   ) |>
   col_vals_gte(
-    columns = vars(removals),
+    columns = vars(n_removals_fy_ytd),
     value = 0,
     na_pass = TRUE,
-    label = "removals >= 0"
+    label = "n_removals_fy_ytd >= 0"
+  ) |>
+  col_vals_gte(
+    columns = vars(famu_removals),
+    value = 0,
+    na_pass = TRUE,
+    label = "famu_removals >= 0"
   ) |>
   interrogate()
 

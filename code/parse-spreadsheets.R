@@ -91,6 +91,31 @@ add_fy_date_cols <- function(df) {
 # text + Oct-Sep + Total
 monthly_col_types <- c("text", rep("numeric", 13))
 
+# In the ADP and Avg-Length-of-Stay tables, column A is labeled "Agency" but
+# actually contains a mix of arresting-agency totals ("CBP Average", "ICE Average",
+# "Average") followed by 2-3 criminality breakdowns under each agency. Lift those
+# into separate `agency` and `criminality` columns. FY19 has 2 criminalities,
+# FY20+ have 3; this works for both.
+lift_agency_criminality <- function(df) {
+  # Drop trailing empty padding rows — FY19 has 9 data rows but the 13-row read
+  # range pads the rest with NA, which would otherwise inherit "Total" from the
+  # last filled agency.
+  df <- df[!is.na(df[[1]]), ]
+  first <- df[[1]]
+  is_agency_row <- str_detect(first, "Average\\s*$")
+  agency_for_row <- case_when(
+    is_agency_row & str_detect(first, "^CBP") ~ "CBP",
+    is_agency_row & str_detect(first, "^ICE") ~ "ICE",
+    is_agency_row & str_squish(first) == "Average" ~ "Total",
+    TRUE ~ NA_character_
+  )
+  criminality_for_row <- if_else(is_agency_row, "Total", first)
+  df$agency <- agency_for_row
+  df <- tidyr::fill(df, agency)
+  df$criminality <- criminality_for_row
+  df[, c("agency", "criminality", names(df)[2:(ncol(df) - 2)])]
+}
+
 # Generic extractor: find sheet + anchor row, read offset range, post-process.
 # `range` is a function of the anchor row index.
 extract_table <- function(
@@ -316,18 +341,20 @@ adp_by_agency_criminality <-
       sheet_pattern = "^Detention",
       anchor_pattern = "ICE Average Daily Population by Arresting Agency, Month and Criminality",
       range = \(r) glue("A{r+1}:N{r+13}"),
-      col_types = monthly_col_types
+      col_types = monthly_col_types,
+      post = lift_agency_criminality
     )
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
-  drop_na(Agency) |>
+  drop_na(agency) |>
   pivot_longer(cols = Oct:Sep, names_to = "month", values_to = "adp") |>
   add_fy_date_cols() |>
   rename(adp_fy_ytd = `FY Overall`) |>
   janitor::clean_names() |>
   relocate(
     agency,
+    criminality,
     month,
     date,
     adp,
@@ -344,12 +371,13 @@ avg_stay_length_by_agency_criminality <-
       sheet_pattern = "^Detention",
       anchor_pattern = "ICE Average Length of Stay by Arresting Agency, Month and Criminality",
       range = \(r) glue("A{r+1}:N{r+13}"),
-      col_types = monthly_col_types
+      col_types = monthly_col_types,
+      post = lift_agency_criminality
     )
   }) |>
   left_join(file_pull_dates, by = "file") |>
   select(-file) |>
-  drop_na(Agency) |>
+  drop_na(agency) |>
   pivot_longer(
     cols = Oct:Sep,
     names_to = "month",
@@ -360,6 +388,7 @@ avg_stay_length_by_agency_criminality <-
   janitor::clean_names() |>
   relocate(
     agency,
+    criminality,
     month,
     date,
     avg_stay_length_days,
@@ -1050,6 +1079,64 @@ vulnerable_population <-
     pull_date
   )
 
+adp_and_stay_length_by_agency <-
+  full_join(
+    adp_by_agency_criminality,
+    avg_stay_length_by_agency_criminality,
+    by = c(
+      "agency", "criminality", "month", "date",
+      "fiscal_year", "file_date", "pull_date"
+    )
+  ) |>
+  relocate(
+    agency,
+    criminality,
+    month,
+    date,
+    adp,
+    adp_fy_ytd,
+    avg_stay_length_days,
+    avg_stay_length_days_fy_ytd,
+    fiscal_year,
+    file_date,
+    pull_date
+  )
+
+flows_by_facility_type <-
+  full_join(
+    book_ins_by_facility_type |>
+      distinct() |>
+      rename(
+        n_book_ins_convicted_criminal = convicted_criminal,
+        n_book_ins_pending_charges = pending_criminal_charges,
+        n_book_ins_other_imm_violator = other_immigration_violator,
+        n_book_ins_total = total
+      ),
+    book_outs_by_facility_type |>
+      distinct() |>
+      rename(n_book_outs_total = total),
+    by = c("facility_type", "fiscal_year", "file_date", "pull_date")
+  ) |>
+  relocate(
+    facility_type,
+    n_book_ins_convicted_criminal,
+    n_book_ins_pending_charges,
+    n_book_ins_other_imm_violator,
+    n_book_ins_total,
+    n_book_outs_total,
+    fiscal_year,
+    file_date,
+    pull_date
+  )
+
+pull_totals <-
+  full_join(
+    distinct(removals),
+    distinct(famu_removals),
+    by = c("fiscal_year", "file_date", "pull_date")
+  ) |>
+  relocate(n_removals_fy_ytd, famu_removals, fiscal_year, file_date, pull_date)
+
 dir.create("data", showWarnings = FALSE, recursive = TRUE)
 
 nanoparquet::write_parquet(
@@ -1058,25 +1145,17 @@ nanoparquet::write_parquet(
 )
 nanoparquet::write_parquet(
   book_outs_by_reason,
-  "data/book-outs-by-reason.parquet"
-)
-nanoparquet::write_parquet(
-  book_outs_by_reason_annual,
-  "data/book-outs-by-reason-annual.parquet"
+  "data/book-outs-by-reason-monthly.parquet"
 )
 nanoparquet::write_parquet(
   book_outs_by_reason_all_years,
-  "data/book-outs-by-reason-all-years.parquet"
+  "data/book-outs-by-reason-annual.parquet"
 )
 nanoparquet::write_parquet(
-  adp_by_agency_criminality,
-  "data/adp-by-agency-criminality.parquet"
+  adp_and_stay_length_by_agency,
+  "data/adp-and-stay-length-by-agency.parquet"
 )
-nanoparquet::write_parquet(
-  avg_stay_length_by_agency_criminality,
-  "data/stay-length-by-agency-criminality.parquet"
-)
-nanoparquet::write_parquet(removals, "data/removals.parquet")
+nanoparquet::write_parquet(pull_totals, "data/pull-totals.parquet")
 nanoparquet::write_parquet(detainees_by_facility, "data/facilities.parquet")
 nanoparquet::write_parquet(
   currently_detained_by_disposition,
@@ -1095,14 +1174,9 @@ nanoparquet::write_parquet(
   "data/currently-detained-by-criminality.parquet"
 )
 nanoparquet::write_parquet(
-  book_ins_by_facility_type,
-  "data/book-ins-by-facility-type.parquet"
+  flows_by_facility_type,
+  "data/flows-by-facility-type.parquet"
 )
-nanoparquet::write_parquet(
-  book_outs_by_facility_type,
-  "data/book-outs-by-facility-type.parquet"
-)
-nanoparquet::write_parquet(famu_removals, "data/famu-removals.parquet")
 nanoparquet::write_parquet(atd_population, "data/atd-population.parquet")
 nanoparquet::write_parquet(atd_by_aor, "data/atd-by-aor.parquet")
 nanoparquet::write_parquet(
