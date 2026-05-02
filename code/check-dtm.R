@@ -494,6 +494,49 @@ agents$freshness <- freshness |>
   ) |>
   interrogate()
 
+# ── 11. Per-table EID staleness (informational) ──────────────────────────────
+# `pull_date` is the per-table "EID as of" date from each source file's
+# Footnotes tab. When ICE leaves a Detention/ADP/etc. sheet as a stale
+# duplicate of an older report (a recurring ICE error pattern), the EID
+# trails the file's publication date by months or years. Such rows remain in
+# the parquet for archival completeness but rank low under "latest pull_date"
+# selection downstream — surface them here for human review.
+#
+# Restricted to tables whose pull_date comes from a per-table EID footnote
+# (the Facilities/ATD/ICLOS/bond/segregation/etc. tables fall back to the
+# Facilities-tab IIDS, which is a different signal).
+
+MAX_STALE_GAP <- 60  # days
+
+stale_check_datasets <- c(
+  "book-ins-by-arresting-agency",
+  "book-outs-by-reason-monthly",
+  "pull-totals",
+  "currently-detained-by-criminality",
+  "adp-and-stay-length-by-agency"
+)
+
+stale_offenders <- map_dfr(stale_check_datasets, \(name) {
+  read_parquet(file.path("data", paste0(name, ".parquet"))) |>
+    filter(!is.na(file_date), !is.na(pull_date)) |>
+    distinct(file_date, pull_date) |>
+    mutate(
+      dataset = name,
+      gap_days = as.integer(file_date - pull_date)
+    )
+}) |>
+  filter(
+    gap_days > MAX_STALE_GAP,
+    # Filter out EOFY fallback file_dates: parse-spreadsheets.R falls back to
+    # YYYY-12-31 when the source filename has no MMDDYYYY, which makes the
+    # gap meaningless against the real publication date. ICE never publishes
+    # on Dec 31 (federal holiday), so 12-31 is a reliable fallback marker.
+    format(file_date, "%m-%d") != "12-31"
+  ) |>
+  group_by(file_date, pull_date, gap_days) |>
+  summarise(datasets = paste(sort(dataset), collapse = ", "), .groups = "drop") |>
+  arrange(desc(gap_days))
+
 # ── Generate markdown summary ─────────────────────────────────────────────────
 
 all_pass <- every(agents, \(a) all(a$validation_set$all_passed))
@@ -522,6 +565,36 @@ md <- map_chr(agents, \(a) {
 
 overall <- if (all_pass) ":white_check_mark: **PASS**" else ":x: **FAIL**"
 md <- paste0("## Data validation: ", overall, "\n\n", md, "\n")
+
+stale_section <- if (nrow(stale_offenders) == 0) {
+  paste(
+    glue("### staleness — per-table EID vs file_date (gap > {MAX_STALE_GAP}d, informational)"),
+    "- :white_check_mark: no source files exceed the staleness gap",
+    sep = "\n"
+  )
+} else {
+  rows <- stale_offenders |>
+    pmap_chr(\(file_date, pull_date, gap_days, datasets) {
+      glue(
+        "- :warning: file_date `{file_date}` — pull_date `{pull_date}` — ",
+        "gap **{gap_days}d** ({datasets})"
+      )
+    })
+  paste(c(
+    glue("### staleness — per-table EID vs file_date (gap > {MAX_STALE_GAP}d, informational)"),
+    "",
+    glue(
+      "Source files whose per-table `EID as of` date trails the file's ",
+      "publication date by more than {MAX_STALE_GAP} days. These rows remain ",
+      "in the parquet but rank low under 'latest `pull_date`' selection ",
+      "downstream. For known-bad files, add to `sheet_skiplist` in ",
+      "`parse-spreadsheets.R`."
+    ),
+    "",
+    rows
+  ), collapse = "\n")
+}
+md <- paste0(md, "\n", stale_section, "\n")
 
 out_path <- Sys.getenv("CHECK_SUMMARY_PATH", "check-summary.md")
 writeLines(md, out_path)

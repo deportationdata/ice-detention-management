@@ -151,20 +151,60 @@ extract_table <- function(
     post()
 }
 
+# Per-file dates. We collect two sources of "when was this data extracted":
+#   1. The Facilities tab "Source: ICE IIDS, MM/DD/YYYY" line (one per file).
+#   2. The per-table "EID as of MM/DD/YYYY" date from the Footnotes tab — one
+#      per output table family (book-ins, book-outs, ADP, removals, currently
+#      detained). ICE maintains these independently, and the Facilities IIDS
+#      can be months or years out of sync with the Detention sheet's actual
+#      EID. Downstream we prefer the per-table EID and fall back to Facilities
+#      IIDS only when absent (ATD/ICLOS/bond/segregation/etc., where there's
+#      no equivalent Footnotes entry).
 file_pull_dates <-
   fls |>
   set_names() |>
   map_dfr(
-    ~ {
+    \(.x) {
       sheet <- get_sheet(.x, "^Facilities")
       if (is.na(sheet)) return(NULL)
-      read_excel(
-        .x,
-        sheet = sheet,
-        range = "A1:A7",
-        col_names = "file_pull_date"
+      fac <- read_excel(
+        .x, sheet = sheet, range = "A1:A7", col_names = "src"
       ) |>
-        filter(str_detect(file_pull_date, "IIDS|^Source:"))
+        filter(str_detect(src, "IIDS|^Source:")) |>
+        slice(1)
+      if (nrow(fac) == 0) return(NULL)
+
+      # Per-table EID dates from the Footnotes tab. Pattern matches the row
+      # label in column A; date is extracted from column B's narrative.
+      eid <- function(pattern) NA_character_
+      shts <- excel_sheets(.x)
+      if ("Footnotes" %in% shts) {
+        foot <- tryCatch(
+          read_excel(.x, sheet = "Footnotes", col_names = FALSE),
+          error = function(e) NULL
+        )
+        if (!is.null(foot) && ncol(foot) >= 2) {
+          col_a <- replace_na(as.character(foot[[1]]), "")
+          col_b <- as.character(foot[[2]])
+          eid <- function(pattern) {
+            hits <- which(str_detect(col_a, pattern))
+            if (length(hits) == 0) return(NA_character_)
+            str_extract(
+              col_b[hits[1]],
+              "(?<=EID as of )\\d{1,2}/\\d{1,2}/\\d{4}"
+            )
+          }
+        }
+      }
+
+      tibble(
+        src = fac$src,
+        eid_bookins  = eid("ICE Initial Book-Ins"),
+        eid_bookouts = eid("ICE Final (Book Outs|Releases)"),
+        eid_adp      = eid("ICE Average Daily Population"),
+        eid_removals = eid("ICE Removals"),
+        eid_detained = eid("ICE Currently Detained Population Breakdown")
+      )
     },
     .id = "file"
   ) |>
@@ -196,11 +236,34 @@ file_pull_dates <-
       list_c(),
 
     file_date = coalesce(date_raw, as.Date(str_c("20", fy, "-12-31"))),
-    pull_date = str_extract(file_pull_date, "\\d{1,2}/\\d{1,2}/\\d{4}") |>
-      mdy(),
+    pull_date_facilities = str_extract(src, "\\d{1,2}/\\d{1,2}/\\d{4}") |> mdy(),
+    pull_date_bookins  = mdy(eid_bookins,  quiet = TRUE),
+    pull_date_bookouts = mdy(eid_bookouts, quiet = TRUE),
+    pull_date_adp      = mdy(eid_adp,      quiet = TRUE),
+    pull_date_removals = mdy(eid_removals, quiet = TRUE),
+    pull_date_detained = mdy(eid_detained, quiet = TRUE),
     fiscal_year = as.integer(str_c("20", fy))
   ) |>
-  select(file, fiscal_year, file_date, pull_date)
+  select(
+    file, fiscal_year, file_date,
+    pull_date_facilities, pull_date_bookins, pull_date_bookouts,
+    pull_date_adp, pull_date_removals, pull_date_detained
+  )
+
+# Resolve `pull_date` for a given table kind: per-table EID if present, else
+# fall back to the Facilities tab IIDS date. Pass kind = "facilities" for
+# tables anchored on the Facilities tab (ATD, ICLOS, bond, segregation,
+# semiannual, vulnerable, facilities itself) — those keep prior behavior.
+file_meta_for <- function(kind) {
+  kind_col <- paste0("pull_date_", kind)
+  file_pull_dates |>
+    transmute(
+      file,
+      fiscal_year,
+      file_date,
+      pull_date = coalesce(.data[[kind_col]], pull_date_facilities)
+    )
+}
 
 # "Currently Detained by Criminality" anchor at A; agency table sits at I(anchor+1):V(anchor+4)
 book_ins_by_arresting_agency <-
@@ -213,7 +276,7 @@ book_ins_by_arresting_agency <-
       col_types = c("text", rep("numeric", 13))
     )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("bookins"), by = "file") |>
   select(-file) |>
   pivot_longer(cols = Oct:Sep, names_to = "month", values_to = "n_book_ins") |>
   rename(arresting_agency = Agency) |>
@@ -259,7 +322,7 @@ book_outs_by_reason <-
       filter(!is.na(`Release Reason`) | !is.na(Criminality)) |>
       fill(`Release Reason`)
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("bookouts"), by = "file") |>
   select(-file) |>
   pivot_longer(cols = Oct:Sep, names_to = "month", values_to = "n_book_outs") |>
   add_fy_date_cols() |>
@@ -318,7 +381,7 @@ book_outs_by_reason_annual <-
     )
   }) |>
   filter(!is.na(release_reason)) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("bookouts"), by = "file") |>
   select(-file)
 
 book_outs_annual_from_monthly <-
@@ -369,7 +432,7 @@ adp_by_agency_criminality <-
       post = lift_agency_criminality
     )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("adp"), by = "file") |>
   select(-file) |>
   drop_na(agency) |>
   pivot_longer(cols = Oct:Sep, names_to = "month", values_to = "adp") |>
@@ -399,7 +462,7 @@ avg_stay_length_by_agency_criminality <-
       post = lift_agency_criminality
     )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("adp"), by = "file") |>
   select(-file) |>
   drop_na(agency) |>
   pivot_longer(
@@ -477,7 +540,7 @@ detainees_by_facility <-
     last_nakamoto_inspection_rating_final   = "last_nak_inspection_rating",
     second_to_last_nakamoto_inspection_type = "s2l_nak_inspection_type"
   )) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("facilities"), by = "file") |>
   select(-file) |>
   mutate(
     alos = as.numeric(alos),
@@ -505,7 +568,7 @@ removals <-
       col_types = "numeric"
     )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("removals"), by = "file") |>
   select(-file)
 
 # Disposition table at A(anchor+1):D(anchor+5)
@@ -515,12 +578,15 @@ currently_detained_by_disposition <-
       .x,
       sheet_pattern = "^Detention",
       anchor_pattern = "Currently Detained by Processing Disposition",
-      range = \(r) glue("A{r+1}:D{r+5}"),
+      # 6 rows = 1 header + up to 5 data rows. FY26+ tables include "Other"
+      # (row 5) in addition to Total / Expedited / NTA / Reinstatement; older
+      # tables have only 4 data rows and the trailing read row comes back NA.
+      range = \(r) glue("A{r+1}:D{r+6}"),
       col_types = c("text", "numeric", "numeric", "numeric"),
       na = c("", "-"),
       post = \(df) {
         names(df)[1] <- "disposition"
-        df <- df |> select(-starts_with("..."))
+        df <- df |> select(-starts_with("...")) |> filter(!is.na(disposition))
         # Map header text to canonical names: FRC/FSC -> fsc_frc, Adult ->
         # adult, Total -> total. FY24/FY25 dropped FSC, so the surviving
         # numeric columns are just Adult and Total — content-based renaming
@@ -537,7 +603,7 @@ currently_detained_by_disposition <-
       }
     )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("detained"), by = "file") |>
   select(-file)
 
 # G(anchor+1):K(anchor+2) — release fiscal year + (gap) + FSC | Adult | Total
@@ -571,7 +637,7 @@ fear_decision_time <-
       }
     )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("detained"), by = "file") |>
   select(-file)
 
 # Fear-decisions-by-facility-type table sits to the right of the disposition
@@ -621,7 +687,7 @@ fear_decisions_by_facility_type <-
       }
     )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("detained"), by = "file") |>
   select(-file)
 
 currently_detained_by_criminality <-
@@ -635,7 +701,7 @@ currently_detained_by_criminality <-
     )
   }) |>
   janitor::clean_names() |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("detained"), by = "file") |>
   select(-file)
 
 # Range r+4 covers all 3 facility types (Total + FSC + Adult) when present;
@@ -653,7 +719,7 @@ book_ins_by_facility_type <-
   }) |>
   janitor::clean_names() |>
   filter(!is.na(facility_type)) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("bookins"), by = "file") |>
   select(-file)
 
 # H(anchor+1):J(anchor+4) — see comment on book_ins_by_facility_type for why r+4.
@@ -675,7 +741,7 @@ book_outs_by_facility_type <-
       }
     )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("bookouts"), by = "file") |>
   select(-file)
 
 # FAMU/FRC removals at P(anchor+3)
@@ -690,7 +756,7 @@ famu_removals <-
       col_types = "numeric"
     )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("removals"), by = "file") |>
   select(-file)
 
 atd_population <-
@@ -727,7 +793,7 @@ atd_population <-
       read_atd_block("ATD Active Population by Status", 6, "status")
     )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("facilities"), by = "file") |>
   select(-file)
 
 atd_by_aor <-
@@ -752,7 +818,7 @@ atd_by_aor <-
       setNames(c("aor_technology", "count", "avg_length_in_program")) |>
       filter(!is.na(aor_technology))
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("facilities"), by = "file") |>
   select(-file) |>
   distinct()
 
@@ -798,7 +864,7 @@ atd_court_appearances <-
         )
     })
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("facilities"), by = "file") |>
   select(-file)
 
 # ICLOS sheet has very wide format (72+ cols, varying year ranges); keep
@@ -876,7 +942,7 @@ iclos_and_detainees <-
       })
     })
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("facilities"), by = "file") |>
   select(-file) |>
   distinct()
 
@@ -932,7 +998,7 @@ monthly_bond_stats <-
         filter(!is.na(value), value != 0, !is.na(date))
     })
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("facilities"), by = "file") |>
   select(-file) |>
   mutate(month = month.abb[month(date)]) |>
   relocate(month, date, metric, value, fiscal_year, file_date, pull_date)
@@ -978,7 +1044,7 @@ monthly_segregation <-
         placement_count = placement_count
       )
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("facilities"), by = "file") |>
   select(-file) |>
   relocate(
     month,
@@ -1088,7 +1154,7 @@ semiannual_data <-
 
     bind_rows(simple_results, tps_results)
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("facilities"), by = "file") |>
   select(-file)
 
 vulnerable_population <-
@@ -1135,7 +1201,7 @@ vulnerable_population <-
       )
     })
   }) |>
-  left_join(file_pull_dates, by = "file") |>
+  left_join(file_meta_for("facilities"), by = "file") |>
   select(-file) |>
   mutate(
     data_fiscal_year = as.integer(str_extract(fy_quarter, "\\d{4}")),
