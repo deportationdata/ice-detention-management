@@ -121,12 +121,16 @@ jobs:
         with:
           ref: ${{ needs.run-and-release.outputs.pr_branch }}
           lfs: true
+          # Need HEAD~1 (the pre-update commit) so the immutability check in
+          # check-dtm.R can compare against the prior parquet baseline.
+          fetch-depth: 2
 
       - uses: r-lib/actions/setup-renv@v2
 
       - name: Run pointblank checks
         env:
           CHECK_SUMMARY_PATH: /tmp/check-summary.md
+          BASELINE_REF: HEAD~1
         run: Rscript code/check-dtm.R || true
 
       - name: Comment results on PR
