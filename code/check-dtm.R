@@ -22,7 +22,7 @@ EXPECTED_FILES <- c(
   "facility-alos",
   "fear-decision-time",
   "fear-decisions-by-facility-type",
-  "flows-by-facility-type",
+  "movements-by-facility-type",
   "iclos-and-detainees",
   "bond-stats",
   "segregation",
@@ -150,11 +150,11 @@ expected_cols <- list(
     "file_date",
     "pull_date"
   ),
-  `flows-by-facility-type` = c(
+  `movements-by-facility-type` = c(
     "facility_type",
-    "flow",
+    "movement",
     "criminality",
-    "n_flows",
+    "n_movements",
     "fiscal_year",
     "file_date",
     "pull_date"

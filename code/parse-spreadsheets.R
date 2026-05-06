@@ -1181,24 +1181,24 @@ nanoparquet::write_parquet(vulnerable_population, "data/vulnerable-population.pa
 
 # Book-ins are reported per criminality bucket; book-outs only at Total —
 # the source asymmetry surfaces as criminality = "Total" on book-out rows.
-flows_by_facility_type <-
+movements_by_facility_type <-
   bind_rows(
     book_ins_by_facility_type |>
       distinct() |>
       pivot_longer(c(convicted_criminal, pending_criminal_charges,
                      other_immigration_violator, total),
-                   names_to = "criminality", values_to = "n_flows") |>
-      mutate(flow = "book-in",
+                   names_to = "criminality", values_to = "n_movements") |>
+      mutate(movement = "book-in",
              criminality = str_to_title(str_replace_all(criminality, "_", " "))),
     book_outs_by_facility_type |>
       distinct() |>
-      rename(n_flows = total) |>
-      mutate(flow = "book-out", criminality = "Total")
+      rename(n_movements = total) |>
+      mutate(movement = "book-out", criminality = "Total")
   ) |>
-  relocate(facility_type, flow, criminality, n_flows,
+  relocate(facility_type, movement, criminality, n_movements,
            fiscal_year, file_date, pull_date) |>
-  collapse_to_latest(c("facility_type", "flow", "criminality", "pull_date"))
-nanoparquet::write_parquet(flows_by_facility_type, "data/flows-by-facility-type.parquet")
+  collapse_to_latest(c("facility_type", "movement", "criminality", "pull_date"))
+nanoparquet::write_parquet(movements_by_facility_type, "data/movements-by-facility-type.parquet")
 
 removals <-
   full_join(distinct(removals_total), distinct(famu_removals),
