@@ -77,6 +77,10 @@ jobs:
         if: steps.check_spreadsheets.outputs.new_files == 'true'
         run: Rscript code/parse-spreadsheets.R
 
+      - name: Bundle distribution files
+        if: steps.check_spreadsheets.outputs.new_files == 'true'
+        run: Rscript code/bundle.R
+
       - name: Commit data files with proactive sync and retry
         if: steps.check_spreadsheets.outputs.new_files == 'true'
         run: |
