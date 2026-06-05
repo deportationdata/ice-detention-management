@@ -2,7 +2,7 @@ name: "Download and release latest DTM spreadsheet"
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # every 15 minutes
+    - cron: '0 0 * * *' # once a day at 00:00 UTC
   workflow_dispatch: # allow manual runs too
 
 permissions:
