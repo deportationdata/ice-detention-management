@@ -23,5 +23,6 @@ if (!file.exists(dest)) {
   tmp <- tempfile(fileext = ".xlsx")
   request(link) |> req_timeout(120) |> req_retry(max_tries = 3) |>
     req_perform(path = tmp)
-  file.rename(tmp, dest)
+  stopifnot(file.copy(tmp, dest))
+  unlink(tmp)
 }
