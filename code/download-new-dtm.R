@@ -23,5 +23,8 @@ if (!file.exists(dest)) {
   tmp <- tempfile(fileext = ".xlsx")
   request(link) |> req_timeout(120) |> req_retry(max_tries = 3) |>
     req_perform(path = tmp)
-  file.rename(tmp, dest)
+  # file.rename() can't move across filesystems (EXDEV) and tempdir() may be
+  # on a different device than the repo, so copy then remove
+  stopifnot(file.copy(tmp, dest))
+  unlink(tmp)
 }
