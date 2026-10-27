@@ -20,6 +20,7 @@ jobs:
 
     env:
       RENV_PATHS_LIBRARY: ~/renv-cache/ice-detention-management
+      RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/__linux__/noble/latest
 
     steps:
       - uses: actions/checkout@v4
@@ -119,6 +120,9 @@ jobs:
 
     env:
       RENV_PATHS_LIBRARY: ~/renv-cache/ice-detention-management
+      # The self-hosted runner is Ubuntu 25.10, which Posit Package Manager has
+      # no binaries for. Use the Ubuntu 24.04 (noble) binaries instead.
+      RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/__linux__/noble/latest
 
     steps:
       - uses: actions/checkout@v4
