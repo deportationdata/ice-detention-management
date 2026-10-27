@@ -19,8 +19,12 @@ jobs:
       pr_branch: ${{ steps.check_spreadsheets.outputs.branch }}
 
     env:
-      RENV_PATHS_LIBRARY: ~/renv-cache/ice-detention-management
-      RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/__linux__/noble/latest
+      # Same renv setup as ice-detention-facilities on this runner. Posit
+      # Package Manager has no Ubuntu 25.10 binaries, so turn off renv's
+      # distro-specific URL rewriting and use the portable manylinux binaries.
+      RENV_PATHS_CACHE: ~/renv-cache
+      RENV_CONFIG_PPM_ENABLED: FALSE
+      RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/__linux__/manylinux_2_28/latest
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +38,13 @@ jobs:
       #     sudo apt-get update
       #     sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
 
-      - uses: r-lib/actions/setup-renv@v2
+      # Reuse packages already installed in the runner's R library; only
+      # missing packages are downloaded.
+      - name: Restore renv library
+        run: |
+          Rscript -e "
+            renv::hydrate(sources = '~/R/aarch64-unknown-linux-gnu-library/4.5')
+          "
 
       - name: Download data
         run: |
@@ -119,10 +129,12 @@ jobs:
     runs-on: [self-hosted]
 
     env:
-      RENV_PATHS_LIBRARY: ~/renv-cache/ice-detention-management
-      # The self-hosted runner is Ubuntu 25.10, which Posit Package Manager has
-      # no binaries for. Use the Ubuntu 24.04 (noble) binaries instead.
-      RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/__linux__/noble/latest
+      # Same renv setup as ice-detention-facilities on this runner. Posit
+      # Package Manager has no Ubuntu 25.10 binaries, so turn off renv's
+      # distro-specific URL rewriting and use the portable manylinux binaries.
+      RENV_PATHS_CACHE: ~/renv-cache
+      RENV_CONFIG_PPM_ENABLED: FALSE
+      RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/__linux__/manylinux_2_28/latest
 
     steps:
       - uses: actions/checkout@v4
@@ -133,7 +145,13 @@ jobs:
           # check-dtm.R can compare against the prior parquet baseline.
           fetch-depth: 2
 
-      - uses: r-lib/actions/setup-renv@v2
+      # Reuse packages already installed in the runner's R library; only
+      # missing packages are downloaded.
+      - name: Restore renv library
+        run: |
+          Rscript -e "
+            renv::hydrate(sources = '~/R/aarch64-unknown-linux-gnu-library/4.5')
+          "
 
       - name: Run pointblank checks
         env:
